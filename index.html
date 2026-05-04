@@ -2296,14 +2296,18 @@ Win = total paytable value × bet of every symbol that exited.`;
         }
       }
 
-      // 5. Ring cells (conveyor) — each one is a clickable "bet target".
-      // Layout: dark cell BG + outward chevron + odds label below + stake
-      // chip above. Tap to add player.bet to that arrow's stake.
-      scene.ringCells     = {};
-      scene.ringCellBgs   = {};
-      scene.ringTokens    = {};
-      scene.arrowBetTexts = {};
-      scene.arrowOddsTexts = {};
+      // 5. Ring cells (conveyor) — each one is a "bet target" with explicit
+      // + and − chip buttons in its corners. Layout per cell:
+      //     stake amount (top, only when > 0)
+      //     outward chevron (middle)
+      //     − button | odds × | + button   (bottom row)
+      scene.ringCells       = {};
+      scene.ringCellBgs     = {};
+      scene.ringTokens      = {};
+      scene.arrowBetTexts   = {};
+      scene.arrowOddsTexts  = {};
+      scene.arrowMinusBtns  = {};
+      scene.arrowPlusBtns   = {};
       const C = GAME.COLS, R = GAME.ROWS;
       const directionForRingSlot = (pos) =>
         (pos >= 1 && pos <= C)                       ? 'up' :
@@ -2311,6 +2315,33 @@ Win = total paytable value × bet of every symbol that exited.`;
         (pos >= C + R + 1 && pos <= 2 * C + R)       ? 'down' :
         (pos >= 2 * C + R + 1 && pos <= 2 * (C + R)) ? 'left' :
         null;
+      const makeArrowChipBtn = (label, accent, onTap) => {
+        const cont = new PIXI.Container();
+        const radius = 9 * gs;
+        const bg = new PIXI.Graphics();
+        const draw = (hover = false) => {
+          bg.clear();
+          bg.lineStyle(1.5 * gs, accent, 0.95);
+          bg.beginFill(hover ? 0x3D4A6E : 0x1A2238, 0.95);
+          bg.drawCircle(0, 0, radius);
+          bg.endFill();
+        };
+        draw();
+        cont.addChild(bg);
+        const t = new PIXI.Text(label, {
+          fontFamily: FONT, fontSize: 16 * gs, fill: accent, fontWeight: 'bold',
+        });
+        t.anchor.set(0.5);
+        t.y = -1;
+        cont.addChild(t);
+        cont.eventMode = 'static';
+        cont.cursor    = 'pointer';
+        cont.hitArea   = new PIXI.Circle(0, 0, radius * 1.4);
+        cont.on('pointerover', () => { draw(true); cont.scale.set(1.10); });
+        cont.on('pointerout',  () => { draw(false); cont.scale.set(1.00); });
+        cont.on('pointertap', onTap);
+        return cont;
+      };
       for (let pos = 1; pos <= RING_SIZE; pos++) {
         const ctr = ringCellCenter(pos);
         if (!ctr) continue;
@@ -2327,12 +2358,12 @@ Win = total paytable value × bet of every symbol that exited.`;
         );
         bg.endFill();
         cellCont.addChild(bg);
-        // Outward chevron.
+        // Outward chevron (slightly above centre).
         const outDir = directionForRingSlot(pos);
         if (outDir) {
           const chev = new PIXI.Graphics();
           chev.lineStyle(3 * gs, 0xFFE082, 0.95);
-          const sz = L.cellSize * 0.18;
+          const sz = L.cellSize * 0.16;
           const angle =
             outDir === 'right' ?  0 :
             outDir === 'down'  ?  Math.PI / 2 :
@@ -2346,9 +2377,10 @@ Win = total paytable value × bet of every symbol that exited.`;
           seg(-sz, 0,  sz, 0);
           seg(  0,-sz, sz, 0);
           seg(  0, sz, sz, 0);
+          chev.y = -L.cellSize * 0.04;
           cellCont.addChild(chev);
         }
-        // Odds label (small, dim).
+        // Odds label (centred, between the two buttons).
         const oddsTxt = new PIXI.Text(
           `×${arrowOddsFor(pos).toFixed(2)}`,
           {
@@ -2358,9 +2390,9 @@ Win = total paytable value × bet of every symbol that exited.`;
         );
         oddsTxt.anchor.set(0.5);
         oddsTxt.x = 0;
-        oddsTxt.y = L.cellSize * 0.34;
+        oddsTxt.y = L.cellSize * 0.30;
         cellCont.addChild(oddsTxt);
-        // Stake chip (bright, hidden when 0).
+        // Stake chip (top, hidden when 0).
         const stakeTxt = new PIXI.Text('', {
           fontFamily: FONT, fontSize: 14 * gs,
           fill: 0xFFE082, stroke: 0x2A1808, strokeThickness: 3 * gs,
@@ -2368,25 +2400,26 @@ Win = total paytable value × bet of every symbol that exited.`;
         });
         stakeTxt.anchor.set(0.5);
         stakeTxt.x = 0;
-        stakeTxt.y = -L.cellSize * 0.30;
+        stakeTxt.y = -L.cellSize * 0.34;
         cellCont.addChild(stakeTxt);
-        // Interactive: tap to add the current chip value to this arrow.
-        cellCont.eventMode = 'static';
-        cellCont.cursor    = 'pointer';
-        cellCont.hitArea   = new PIXI.Rectangle(
-          -L.cellSize / 2, -L.cellSize / 2,
-          L.cellSize, L.cellSize
-        );
-        cellCont.on('pointertap',  (e) => onArrowTap(pos, e));
-        cellCont.on('rightdown',   () => onArrowClear(pos));
-        cellCont.on('pointerover', () => { bg.alpha = 0.78; });
-        cellCont.on('pointerout',  () => { bg.alpha = 1.00; });
+        // − and + buttons at bottom corners.
+        const minusBtn = makeArrowChipBtn('−', 0xE8786C, () => onArrowSubtractOne(pos));
+        minusBtn.x = -L.cellSize * 0.35;
+        minusBtn.y =  L.cellSize * 0.30;
+        cellCont.addChild(minusBtn);
+        const plusBtn  = makeArrowChipBtn('+', 0x6FE0D6, () => onArrowAddOne(pos));
+        plusBtn.x  =  L.cellSize * 0.35;
+        plusBtn.y  =  L.cellSize * 0.30;
+        cellCont.addChild(plusBtn);
+        // Cell itself is no longer interactive — buttons are.
         frame.addChild(cellCont);
         scene.ringCells[pos]      = cellCont;
         scene.ringCellBgs[pos]    = bg;
         scene.ringTokens[pos]     = null;
         scene.arrowBetTexts[pos]  = stakeTxt;
         scene.arrowOddsTexts[pos] = oddsTxt;
+        scene.arrowMinusBtns[pos] = minusBtn;
+        scene.arrowPlusBtns[pos]  = plusBtn;
       }
       refreshArrowBetVisuals();
 
@@ -2780,27 +2813,16 @@ Win = total paytable value × bet of every symbol that exited.`;
         // staked arrows pop visually while the round resolves.
         const cell = scene.ringCells && scene.ringCells[pos];
         if (cell) cell.alpha = (busy && stake === 0) ? 0.32 : 1.0;
+        // Minus button only shows when there's something to remove.
+        // Plus button hides while spinning (cell already dimmed/locked).
+        const minusBtn = scene.arrowMinusBtns && scene.arrowMinusBtns[pos];
+        const plusBtn  = scene.arrowPlusBtns  && scene.arrowPlusBtns[pos];
+        if (minusBtn) minusBtn.visible = !busy && stake > 0;
+        if (plusBtn)  plusBtn.visible  = !busy;
       }
     }
-    // Pull shiftKey out of whatever PIXI hands us (varies by version).
-    function _evtIsShift(e) {
-      const orig = e && (e.nativeEvent || (e.data && e.data.originalEvent));
-      if (orig && typeof orig.shiftKey === 'boolean') return orig.shiftKey;
-      return !!(e && e.shiftKey);
-    }
-    function onArrowTap(pos, e) {
+    function onArrowAddOne(pos) {
       if (scene.spinBtn && scene.spinBtn.busy) return;
-      // Shift-tap removes one chip from this arrow (down to 0).
-      if (_evtIsShift(e)) {
-        const cur = player.arrowBets[pos] || 0;
-        if (cur <= 0) return;
-        const next = Math.max(0, cur - player.bet);
-        if (next === 0) delete player.arrowBets[pos];
-        else            player.arrowBets[pos] = next;
-        refreshArrowBetVisuals();
-        refreshHUD();
-        return;
-      }
       const stake = player.arrowBets[pos] || 0;
       const projectedTotal = sumArrowBets(player.arrowBets) + player.bet;
       if (projectedTotal > player.balance) {
@@ -2811,9 +2833,13 @@ Win = total paytable value × bet of every symbol that exited.`;
       refreshArrowBetVisuals();
       refreshHUD();
     }
-    function onArrowClear(pos) {
+    function onArrowSubtractOne(pos) {
       if (scene.spinBtn && scene.spinBtn.busy) return;
-      delete player.arrowBets[pos];
+      const cur = player.arrowBets[pos] || 0;
+      if (cur <= 0) return;
+      const next = Math.max(0, cur - player.bet);
+      if (next === 0) delete player.arrowBets[pos];
+      else            player.arrowBets[pos] = next;
       refreshArrowBetVisuals();
       refreshHUD();
     }
