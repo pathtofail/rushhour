@@ -2172,74 +2172,6 @@ Win = total paytable value × bet of every symbol that exited.`;
     // ── Mode button (for the bottom row) ─────────────────────────────────
     // Pill-style: gold border + dark slate fill + cream label. Active mode
     // gets a slightly brighter slate fill + bold gold label.
-    function makeModeButton({ x, y, w, h, label, isActive, onTap }) {
-      const cont = new PIXI.Container();
-      cont.x = x; cont.y = y;
-      const gs = L.gameScale;
-      const bg = new PIXI.Graphics();
-      const draw = (hover = false) => {
-        bg.clear();
-        bg.lineStyle(2 * gs, 0xC9A24A, 0.95);
-        const fill = isActive ? 0x2C3552 : (hover ? 0x232B45 : 0x1A2238);
-        bg.beginFill(fill, 0.92);
-        bg.drawRoundedRect(-w / 2, -h / 2, w, h, h * 0.4);
-        bg.endFill();
-      };
-      draw(false);
-      cont.addChild(bg);
-      const lbl = new PIXI.Text(label, {
-        fontFamily: FONT, fontSize: 16 * gs,
-        fill: isActive ? 0xFFD54F : 0xFFECB3,
-        letterSpacing: 0.6,
-      });
-      lbl.anchor.set(0.5);
-      cont.addChild(lbl);
-      cont.eventMode = 'static'; cont.cursor = 'pointer';
-      cont.hitArea = new PIXI.RoundedRectangle(-w / 2, -h / 2, w, h, h * 0.4);
-      cont.on('pointerover', () => {
-        if (isActive) return;
-        draw(true);
-        gsap.to(cont.scale, { x: 1.04, y: 1.04, duration: 0.12, ease: 'sine.out' });
-      });
-      cont.on('pointerout', () => {
-        draw(false);
-        gsap.to(cont.scale, { x: 1, y: 1, duration: 0.12 });
-      });
-      cont.on('pointertap', onTap);
-      return cont;
-    }
-
-    // ── Mode confirm modal ───────────────────────────────────────────────
-    // Click any mode button → open this. Title + description + CANCEL/PLAY.
-    // PLAY persists the chosen mode and reloads the page so buildScene
-    // re-runs with the new mode active.
-    function openModeConfirmModal(modeKey) {
-      const def = MODE_DEF[modeKey];
-      if (!def) return;
-      _openSimpleModal({
-        title: def.name,
-        bodyLines: (def.description || []).map(text => ({ text })),
-        buttons: [
-          {
-            label: 'CANCEL',
-            fill: 0x4A1A1A, hoverFill: 0x6A2424, stroke: 0xC9A24A,
-            onTap: (close) => close(),
-          },
-          {
-            label: 'PLAY',
-            fill: 0x1A4A2A, hoverFill: 0x247035, stroke: 0xC9A24A,
-            onTap: (close) => {
-              close();
-              if (MODE === modeKey) return;        // already active
-              setMode(modeKey);
-              // Reload so the scene rebuilds with the new mode's grid /
-              // conveyor / hooks. (Simpler than in-place teardown.)
-              window.location.reload();
-            },
-          },
-        ],
-      });
-    }
 
     function makeAdjustButton(symbol, onTap) {
       const gs = L.gameScale;
@@ -2697,48 +2629,8 @@ Win = total paytable value × bet of every symbol that exited.`;
       scene.rtpText.y = L.sh - 18 * gs;
       scene.stage.addChild(scene.rtpText);
 
-      // ── Mode button row (top of canvas) ───────────────────────────────
-      // BB pattern: caption near the top edge, buttons just below, auto-
-      // generated from MODE_DEF sorted by displayOrder. Click during a
-      // spin or free-spin feature is blocked.
-      const modeList = Object.values(MODE_DEF)
-        .slice()
-        .sort((a, b) => (a.displayOrder ?? 999) - (b.displayOrder ?? 999));
-      const modeBtnW = 190 * gs;
-      const modeBtnH = 48 * gs;
-      const modeGap  = 12 * gs;
-      const modeRowW = modeList.length * modeBtnW + (modeList.length - 1) * modeGap;
-      const modeRowLeftCX = (L.sw - modeRowW) / 2 + modeBtnW / 2;
-      const modeCaptionY = 14 * gs;
-      const modeRowY = modeCaptionY + 22 * gs + modeBtnH / 2;
-      const modeCaption = new PIXI.Text('GAME MODE', {
-        fontFamily: FONT, fontSize: 13 * gs, fill: 0xFFD54F, letterSpacing: 2,
-      });
-      modeCaption.anchor.set(0.5, 0);
-      modeCaption.x = L.sw / 2;
-      modeCaption.y = modeCaptionY;
-      modeCaption.alpha = 0.85;
-      scene.stage.addChild(modeCaption);
-      modeList.forEach((m, i) => {
-        const btn = makeModeButton({
-          x: modeRowLeftCX + i * (modeBtnW + modeGap),
-          y: modeRowY,
-          w: modeBtnW, h: modeBtnH,
-          label: m.name,
-          isActive: m.key === MODE,
-          onTap: () => {
-            // Block during a spin in flight or active free-spin feature.
-            if (scene.spinBtn && scene.spinBtn.busy) return;
-            if (game.state && game.state.inFreeSpin) return;
-            openModeConfirmModal(m.key);
-          },
-        });
-        scene.stage.addChild(btn);
-      });
-
-      // Per-mode scene widget hook (BB-style). Future modes can register
-      // a `buildSceneFeatureWidget` that adds mode-specific UI (e.g. a
-      // multiplier ladder, a pot-fill bar) without modifying buildScene.
+      // Per-mode scene widget hook (BB-style). Currently a no-op for
+      // rush, kept so future widgets can plug in here.
       window.RushHour.getModeDef().buildSceneFeatureWidget?.(scene, app, { L });
 
       // Sync HUD state (gating, free-spin banner) on first paint AND every
