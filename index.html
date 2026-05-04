@@ -2296,18 +2296,19 @@ Win = total paytable value × bet of every symbol that exited.`;
         }
       }
 
-      // 5. Ring cells (conveyor) — each one is a "bet target" with explicit
-      // + and − chip buttons in its corners. Layout per cell:
-      //     stake amount (top, only when > 0)
-      //     outward chevron (middle)
-      //     − button | odds × | + button   (bottom row)
+      // 5. Ring cells (conveyor) — each one is a "bet target". Tap the
+      // cell to add one chip; a − button appears next to the stake when
+      // there's something to remove.
+      // Layout per cell:
+      //     stake amount $X  −     (top, − only when stake > 0)
+      //     outward chevron        (middle)
+      //     odds ×N.NN             (bottom)
       scene.ringCells       = {};
       scene.ringCellBgs     = {};
       scene.ringTokens      = {};
       scene.arrowBetTexts   = {};
       scene.arrowOddsTexts  = {};
       scene.arrowMinusBtns  = {};
-      scene.arrowPlusBtns   = {};
       const C = GAME.COLS, R = GAME.ROWS;
       const directionForRingSlot = (pos) =>
         (pos >= 1 && pos <= C)                       ? 'up' :
@@ -2339,7 +2340,13 @@ Win = total paytable value × bet of every symbol that exited.`;
         cont.hitArea   = new PIXI.Circle(0, 0, radius * 1.4);
         cont.on('pointerover', () => { draw(true); cont.scale.set(1.10); });
         cont.on('pointerout',  () => { draw(false); cont.scale.set(1.00); });
-        cont.on('pointertap', onTap);
+        // Stop propagation so the minus tap doesn't bubble up to the
+        // cell's "tap to add" handler and cancel itself out.
+        cont.on('pointertap', (e) => {
+          if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+          if (e && typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+          onTap();
+        });
         return cont;
       };
       for (let pos = 1; pos <= RING_SIZE; pos++) {
@@ -2358,12 +2365,12 @@ Win = total paytable value × bet of every symbol that exited.`;
         );
         bg.endFill();
         cellCont.addChild(bg);
-        // Outward chevron (slightly above centre).
+        // Outward chevron (centre).
         const outDir = directionForRingSlot(pos);
         if (outDir) {
           const chev = new PIXI.Graphics();
           chev.lineStyle(3 * gs, 0xFFE082, 0.95);
-          const sz = L.cellSize * 0.16;
+          const sz = L.cellSize * 0.18;
           const angle =
             outDir === 'right' ?  0 :
             outDir === 'down'  ?  Math.PI / 2 :
@@ -2377,10 +2384,9 @@ Win = total paytable value × bet of every symbol that exited.`;
           seg(-sz, 0,  sz, 0);
           seg(  0,-sz, sz, 0);
           seg(  0, sz, sz, 0);
-          chev.y = -L.cellSize * 0.04;
           cellCont.addChild(chev);
         }
-        // Odds label (centred, between the two buttons).
+        // Odds label (small, dim, at the bottom).
         const oddsTxt = new PIXI.Text(
           `×${arrowOddsFor(pos).toFixed(2)}`,
           {
@@ -2390,28 +2396,35 @@ Win = total paytable value × bet of every symbol that exited.`;
         );
         oddsTxt.anchor.set(0.5);
         oddsTxt.x = 0;
-        oddsTxt.y = L.cellSize * 0.30;
+        oddsTxt.y = L.cellSize * 0.34;
         cellCont.addChild(oddsTxt);
-        // Stake chip (top, hidden when 0).
+        // Stake chip + minus button live together at the top of the
+        // cell, so the player removes a chip right next to the value
+        // they're removing it from.
         const stakeTxt = new PIXI.Text('', {
           fontFamily: FONT, fontSize: 14 * gs,
           fill: 0xFFE082, stroke: 0x2A1808, strokeThickness: 3 * gs,
           fontWeight: 'bold',
         });
         stakeTxt.anchor.set(0.5);
-        stakeTxt.x = 0;
-        stakeTxt.y = -L.cellSize * 0.34;
+        stakeTxt.x = -L.cellSize * 0.10;          // shifted left so − fits to the right
+        stakeTxt.y = -L.cellSize * 0.30;
         cellCont.addChild(stakeTxt);
-        // − and + buttons at bottom corners.
         const minusBtn = makeArrowChipBtn('−', 0xE8786C, () => onArrowSubtractOne(pos));
-        minusBtn.x = -L.cellSize * 0.35;
-        minusBtn.y =  L.cellSize * 0.30;
+        minusBtn.x =  L.cellSize * 0.30;
+        minusBtn.y = -L.cellSize * 0.30;          // same row as stake
         cellCont.addChild(minusBtn);
-        const plusBtn  = makeArrowChipBtn('+', 0x6FE0D6, () => onArrowAddOne(pos));
-        plusBtn.x  =  L.cellSize * 0.35;
-        plusBtn.y  =  L.cellSize * 0.30;
-        cellCont.addChild(plusBtn);
-        // Cell itself is no longer interactive — buttons are.
+        // The cell itself is the "+" target — tap anywhere on it to
+        // add one chip to this arrow's stake.
+        cellCont.eventMode = 'static';
+        cellCont.cursor    = 'pointer';
+        cellCont.hitArea   = new PIXI.Rectangle(
+          -L.cellSize / 2, -L.cellSize / 2,
+          L.cellSize, L.cellSize
+        );
+        cellCont.on('pointertap',  () => onArrowAddOne(pos));
+        cellCont.on('pointerover', () => { bg.alpha = 0.78; });
+        cellCont.on('pointerout',  () => { bg.alpha = 1.00; });
         frame.addChild(cellCont);
         scene.ringCells[pos]      = cellCont;
         scene.ringCellBgs[pos]    = bg;
@@ -2813,12 +2826,10 @@ Win = total paytable value × bet of every symbol that exited.`;
         // staked arrows pop visually while the round resolves.
         const cell = scene.ringCells && scene.ringCells[pos];
         if (cell) cell.alpha = (busy && stake === 0) ? 0.32 : 1.0;
-        // Minus button only shows when there's something to remove.
-        // Plus button hides while spinning (cell already dimmed/locked).
+        // Minus button only shows when there's something to remove,
+        // and only outside of an in-flight spin.
         const minusBtn = scene.arrowMinusBtns && scene.arrowMinusBtns[pos];
-        const plusBtn  = scene.arrowPlusBtns  && scene.arrowPlusBtns[pos];
         if (minusBtn) minusBtn.visible = !busy && stake > 0;
-        if (plusBtn)  plusBtn.visible  = !busy;
       }
     }
     function onArrowAddOne(pos) {
