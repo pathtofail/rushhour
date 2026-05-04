@@ -153,24 +153,60 @@ const edgeName = (pos) =>
   (pos >= C + R + 1 && pos <= 2 * C + R)       ? 'bottom' :
   (pos >= 2 * C + R + 1 && pos <= 2 * (C + R)) ? 'left' : '';
 
-console.log('pos | edge   | P(hit)  | odds (0.95/P) | E[exits]');
-console.log('----|--------|---------|---------------|---------');
+// The engine has gravity (top→bottom), so it's left-right symmetric but
+// NOT vertically symmetric. Each ring slot has exactly one mirror partner
+// across the vertical centre line; we average their measured probabilities
+// to eliminate sampling noise from a real symmetry.
+function mirrorSlot(pos) {
+  // Top edge 1..C → mirror within top edge: 1↔C, 2↔C-1, …
+  if (pos >= 1 && pos <= C) return C + 1 - pos;
+  // Right edge C+1..C+R ↔ Left edge 2C+R+1..2(C+R) by row.
+  // Right slot at row r (pos = C+1+r) mirrors to left slot at row r
+  //   (left pos = 2(C+R) - r).
+  if (pos >= C + 1 && pos <= C + R) {
+    const r = pos - C - 1;
+    return 2 * (C + R) - r;
+  }
+  // Bottom edge C+R+1..2C+R: mirror within bottom edge.
+  if (pos >= C + R + 1 && pos <= 2 * C + R) {
+    const off = pos - (C + R);    // 1..C
+    return (C + R) + (C + 1 - off);
+  }
+  // Left edge mirrors to right edge.
+  if (pos >= 2 * C + R + 1 && pos <= 2 * (C + R)) {
+    const r = 2 * (C + R) - pos;
+    return C + 1 + r;
+  }
+  return pos;
+}
+
+console.log('pos | edge   | P(raw)  | P(sym)  | odds (0.95/P_sym) | E[exits]');
+console.log('----|--------|---------|---------|-------------------|---------');
+const pSym = new Array(RING_SIZE + 1).fill(0);
 const odds = {};
+for (let pos = 1; pos <= RING_SIZE; pos++) {
+  const pa = hits[pos] / N;
+  const pb = hits[mirrorSlot(pos)] / N;
+  pSym[pos] = (pa + pb) / 2;
+  const o = pSym[pos] > 0 ? TARGET / pSym[pos] : 0;
+  odds[pos] = +o.toFixed(3);
+}
 for (let pos = 1; pos <= RING_SIZE; pos++) {
   const p = hits[pos] / N;
   const e = counts[pos] / N;
-  const o = p > 0 ? TARGET / p : 0;
-  odds[pos] = +o.toFixed(3);
   console.log(
-    `${String(pos).padStart(3)} | ${edgeName(pos).padEnd(6)} | ${p.toFixed(4)} | ${o.toFixed(3).padStart(13)} | ${e.toFixed(3)}`
+    `${String(pos).padStart(3)} | ${edgeName(pos).padEnd(6)} | ${p.toFixed(4)} | ${pSym[pos].toFixed(4)} | ${odds[pos].toFixed(3).padStart(17)} | ${e.toFixed(3)}`
   );
 }
 
-// Verify RTP if a player bets uniformly on all arrows.
+// Verify RTP under symmetric odds with a uniform stake on every arrow.
+// (Uses the RAW measured probabilities — the noise WITHIN a mirror pair
+// cancels out across the pair, so per-pair RTP is exactly 0.95 in
+// expectation; the printed number measures it on this run.)
 let expectedReturn = 0;
 for (let pos = 1; pos <= RING_SIZE; pos++) {
   const p = hits[pos] / N;
-  expectedReturn += p * odds[pos];   // stake of 1 on each arrow
+  expectedReturn += p * odds[pos];
 }
 const rtp = expectedReturn / RING_SIZE;
 console.log(`\nAll-arrows uniform-stake RTP: ${(rtp * 100).toFixed(2)}%`);

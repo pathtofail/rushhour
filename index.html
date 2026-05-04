@@ -149,11 +149,14 @@
     // paste the printed table below.
     // Layout for a 4×4 grid (16 slots, clockwise from top-left):
     //   top:    1..4    right: 5..8     bottom: 9..12    left: 13..16
+    // Engine has gravity, so it's only left-right symmetric — slots that
+    // mirror across the vertical centre line are guaranteed identical.
+    // The sim averages each mirror pair, eliminating measurement noise.
     const RUSH_ARROW_ODDS = {
-       1: 1.529,  2: 1.865,  3: 1.877,  4: 1.528,
-       5: 1.502,  6: 2.005,  7: 2.413,  8: 2.317,
-       9: 2.362, 10: 2.781, 11: 2.742, 12: 2.295,
-      13: 2.284, 14: 2.416, 15: 2.040, 16: 1.494,
+       1: 1.529,  2: 1.871,  3: 1.871,  4: 1.529,
+       5: 1.498,  6: 2.022,  7: 2.415,  8: 2.301,
+       9: 2.328, 10: 2.762, 11: 2.762, 12: 2.328,
+      13: 2.301, 14: 2.415, 15: 2.022, 16: 1.498,
     };
     const RUSH_DEFAULT_ARROW_ODDS = 2.0;
     function arrowOddsFor(pos) {
