@@ -140,9 +140,31 @@
     function spawnRushSymbol() {
       return { color: weightedColor(), wild: false, arrow: rollArrow() };
     }
-    // Only cars exiting through this edge pay. Mirrors the "designated
-    // exit" mechanic from the original Rush Hour puzzle.
-    const RUSH_PAY_EDGE = 'right';
+    // Per-arrow odds: a stake on ring slot N pays back stake × ODDS[N]
+    // when at least one car exits through that slot during the round.
+    // Calibrated so betting equally on every arrow yields 95% RTP, with
+    // each individual arrow ALSO returning 95% (odds_i = 0.95 / P_i).
+    // Probabilities measured by sim against the live engine — if you
+    // change cascade rules, re-run `node scripts/sim-arrows.mjs` and
+    // paste the printed table below.
+    // Layout for a 4×4 grid (16 slots, clockwise from top-left):
+    //   top:    1..4    right: 5..8     bottom: 9..12    left: 13..16
+    const RUSH_ARROW_ODDS = {
+       1: 1.529,  2: 1.865,  3: 1.877,  4: 1.528,
+       5: 1.502,  6: 2.005,  7: 2.413,  8: 2.317,
+       9: 2.362, 10: 2.781, 11: 2.742, 12: 2.295,
+      13: 2.284, 14: 2.416, 15: 2.040, 16: 1.494,
+    };
+    const RUSH_DEFAULT_ARROW_ODDS = 2.0;
+    function arrowOddsFor(pos) {
+      return RUSH_ARROW_ODDS[pos] ?? RUSH_DEFAULT_ARROW_ODDS;
+    }
+    // Sum the stakes the player has placed across all arrows.
+    function sumArrowBets(bets) {
+      let total = 0;
+      for (const k in bets) total += bets[k] || 0;
+      return total;
+    }
     function spawnAnyCell() { return spawnRushSymbol(); }
     function generateGrid() {
       const g = [];
@@ -302,8 +324,8 @@
     // symbols into the empty cells from above; then the next move pass
     // runs. Cascade ends when a move pass produces zero movements.
     // No tokens are spawned (yet) — the conveyor frame is decorative.
-    const RUSH_GAME = { ROWS: 5, COLS: 5, MIN_CLUSTER: 5, MAX_CASCADES: 20 };
-    // 4-sided conveyor wrapping a 5×5 slot: 2*(R+C) = 20 ring slots.
+    const RUSH_GAME = { ROWS: 4, COLS: 4, MIN_CLUSTER: 5, MAX_CASCADES: 20 };
+    // 4-sided conveyor wrapping a 4×4 slot: 2*(R+C) = 16 ring slots.
     const RUSH_RING_SIZE  = 2 * (RUSH_GAME.ROWS + RUSH_GAME.COLS);
     const RUSH_FINISH_POS = RUSH_RING_SIZE + 1;
 
@@ -376,19 +398,14 @@
               color: cell.color, arrow,
             });
           } else {
-            // Exit. Pays only when the car leaves through the designated
-            // pay edge — exits via any other side clear the cell but
-            // pay 0.
-            const isPayingEdge = (arrow === RUSH_PAY_EDGE);
-            const basePay = isPayingEdge ? (COLOR_BY_NAME[cell.color]?.basePay || 0) : 0;
-            const payAmount = basePay * bet;
-            totalPayout += payAmount;
+            // Exit. Engine no longer computes pay — payouts are driven by
+            // the per-arrow bet model in the UI. Just record which ring
+            // slot the car drove out through.
             grid[r][c] = null;
             const ringPos = ringSlotForExit(r, c, arrow);
             moves.push({
               kind: 'exit', from: { r, c }, edge: arrow,
-              color: cell.color, arrow, payAmount, ringPos,
-              paying: isPayingEdge,
+              color: cell.color, arrow, ringPos,
             });
           }
         }
@@ -632,7 +649,11 @@ Win = total paytable value × bet of every symbol that exited.`;
     // ── Player + UI state ────────────────────────────────────────────────────
     // Bet values copied from Bloom Burst.
     const BET_LEVELS = [1, 2, 5, 10, 20, 50, 100, 200];
-    const player = { balance: 10000, bet: 1, busy: false };
+    // bet     — current "chip value": amount added to a slot when the
+    //           player taps an arrow.
+    // arrowBets — { ringPos → stake } map; stakes are in chip units, all
+    //           wagered together when the spin runs.
+    const player = { balance: 10000, bet: 1, busy: false, arrowBets: {} };
     const fmtCash = n => `$${n.toFixed(2)}`;
     // Compact format for cramped UI surfaces (token chips, etc.):
     // drops decimals when whole, uses K/M suffixes for large values.
@@ -2272,56 +2293,99 @@ Win = total paytable value × bet of every symbol that exited.`;
         }
       }
 
-      // 5. Ring cells (conveyor — top + right column).
-      scene.ringCellBgs = {};
-      scene.ringTokens = {};
-      // RING_SIZE collectible cells (pos 1..RING_SIZE) — the actual
-      // conveyor where tokens travel and can be intercepted.
+      // 5. Ring cells (conveyor) — each one is a clickable "bet target".
+      // Layout: dark cell BG + outward chevron + odds label below + stake
+      // chip above. Tap to add player.bet to that arrow's stake.
+      scene.ringCells     = {};
+      scene.ringCellBgs   = {};
+      scene.ringTokens    = {};
+      scene.arrowBetTexts = {};
+      scene.arrowOddsTexts = {};
+      const C = GAME.COLS, R = GAME.ROWS;
+      const directionForRingSlot = (pos) =>
+        (pos >= 1 && pos <= C)                       ? 'up' :
+        (pos >= C + 1 && pos <= C + R)               ? 'right' :
+        (pos >= C + R + 1 && pos <= 2 * C + R)       ? 'down' :
+        (pos >= 2 * C + R + 1 && pos <= 2 * (C + R)) ? 'left' :
+        null;
       for (let pos = 1; pos <= RING_SIZE; pos++) {
         const ctr = ringCellCenter(pos);
         if (!ctr) continue;
+        const cellCont = new PIXI.Container();
+        cellCont.x = ctr.x;
+        cellCont.y = ctr.y;
+        // Cell BG.
         const bg = new PIXI.Graphics();
-        bg.lineStyle(1.5 * gs, 0xC9A24A, 0.9);   // conveyor: gold border
-        bg.beginFill(0x1B2238, 0.95);            // dark base, gold reads as "loot path"
+        bg.lineStyle(1.5 * gs, 0xC9A24A, 0.9);
+        bg.beginFill(0x1B2238, 0.95);
         bg.drawRoundedRect(
-          ctr.x - L.cellSize / 2, ctr.y - L.cellSize / 2,
+          -L.cellSize / 2, -L.cellSize / 2,
           L.cellSize, L.cellSize, 8 * gs
         );
         bg.endFill();
-        // Rush Hour: paint a chevron arrow on every non-corner conveyor
-        // cell pointing OUTWARD (the direction a car would exit through
-        // that slot). Decorative — communicates "exits happen here".
-        if (MODE === 'rush') {
-          const C = GAME.COLS, R = GAME.ROWS;
-          const outDir =
-            (pos >= 1 && pos <= C)                       ? 'up' :
-            (pos >= C + 1 && pos <= C + R)               ? 'right' :
-            (pos >= C + R + 1 && pos <= 2 * C + R)       ? 'down' :
-            (pos >= 2 * C + R + 1 && pos <= 2 * (C + R)) ? 'left' :
-            null;
-          if (outDir) {
-            bg.lineStyle(3 * gs, 0xFFE082, 0.95);
-            const sz = L.cellSize * 0.22;
-            // Chevron defined in a "right-pointing" frame; rotate to outDir.
-            const angle =
-              outDir === 'right' ?  0 :
-              outDir === 'down'  ?  Math.PI / 2 :
-              outDir === 'left'  ?  Math.PI :
-              /* up */              -Math.PI / 2;
-            const cos = Math.cos(angle), sin = Math.sin(angle);
-            const seg = (x1, y1, x2, y2) => {
-              bg.moveTo(ctr.x + x1 * cos - y1 * sin, ctr.y + x1 * sin + y1 * cos);
-              bg.lineTo(ctr.x + x2 * cos - y2 * sin, ctr.y + x2 * sin + y2 * cos);
-            };
-            seg(-sz, 0,  sz, 0);   // shaft
-            seg(  0,-sz, sz, 0);   // upper barb
-            seg(  0, sz, sz, 0);   // lower barb
-          }
+        cellCont.addChild(bg);
+        // Outward chevron.
+        const outDir = directionForRingSlot(pos);
+        if (outDir) {
+          const chev = new PIXI.Graphics();
+          chev.lineStyle(3 * gs, 0xFFE082, 0.95);
+          const sz = L.cellSize * 0.18;
+          const angle =
+            outDir === 'right' ?  0 :
+            outDir === 'down'  ?  Math.PI / 2 :
+            outDir === 'left'  ?  Math.PI :
+            /* up */              -Math.PI / 2;
+          const cos = Math.cos(angle), sin = Math.sin(angle);
+          const seg = (x1, y1, x2, y2) => {
+            chev.moveTo(x1 * cos - y1 * sin, x1 * sin + y1 * cos);
+            chev.lineTo(x2 * cos - y2 * sin, x2 * sin + y2 * cos);
+          };
+          seg(-sz, 0,  sz, 0);
+          seg(  0,-sz, sz, 0);
+          seg(  0, sz, sz, 0);
+          cellCont.addChild(chev);
         }
-        frame.addChild(bg);
-        scene.ringCellBgs[pos] = bg;
-        scene.ringTokens[pos] = null;
+        // Odds label (small, dim).
+        const oddsTxt = new PIXI.Text(
+          `×${arrowOddsFor(pos).toFixed(2)}`,
+          {
+            fontFamily: FONT, fontSize: 10 * gs,
+            fill: 0xC9A24A, alpha: 0.85,
+          }
+        );
+        oddsTxt.anchor.set(0.5);
+        oddsTxt.x = 0;
+        oddsTxt.y = L.cellSize * 0.34;
+        cellCont.addChild(oddsTxt);
+        // Stake chip (bright, hidden when 0).
+        const stakeTxt = new PIXI.Text('', {
+          fontFamily: FONT, fontSize: 14 * gs,
+          fill: 0xFFE082, stroke: 0x2A1808, strokeThickness: 3 * gs,
+          fontWeight: 'bold',
+        });
+        stakeTxt.anchor.set(0.5);
+        stakeTxt.x = 0;
+        stakeTxt.y = -L.cellSize * 0.30;
+        cellCont.addChild(stakeTxt);
+        // Interactive: tap to add the current chip value to this arrow.
+        cellCont.eventMode = 'static';
+        cellCont.cursor    = 'pointer';
+        cellCont.hitArea   = new PIXI.Rectangle(
+          -L.cellSize / 2, -L.cellSize / 2,
+          L.cellSize, L.cellSize
+        );
+        cellCont.on('pointertap',  (e) => onArrowTap(pos, e));
+        cellCont.on('rightdown',   () => onArrowClear(pos));
+        cellCont.on('pointerover', () => { bg.alpha = 0.78; });
+        cellCont.on('pointerout',  () => { bg.alpha = 1.00; });
+        frame.addChild(cellCont);
+        scene.ringCells[pos]      = cellCont;
+        scene.ringCellBgs[pos]    = bg;
+        scene.ringTokens[pos]     = null;
+        scene.arrowBetTexts[pos]  = stakeTxt;
+        scene.arrowOddsTexts[pos] = oddsTxt;
       }
+      refreshArrowBetVisuals();
 
       // Creating tile (pos 0) — LEFT of pos 1. Visually distinct portal
       // shape. Each spin it puffs smoke; sometimes a new token emerges.
@@ -2698,7 +2762,42 @@ Win = total paytable value × bet of every symbol that exited.`;
     }
     function canAffordSpin() {
       if (inFreeSpinFeature()) return true;
-      return player.balance >= player.bet;
+      // Multi-bet roulette: total wager is the sum of arrow stakes.
+      return sumArrowBets(player.arrowBets) > 0
+          && player.balance >= sumArrowBets(player.arrowBets);
+    }
+    function refreshArrowBetVisuals() {
+      if (!scene.arrowBetTexts) return;
+      for (const pos in scene.arrowBetTexts) {
+        const stake = player.arrowBets[+pos] || 0;
+        const txt = scene.arrowBetTexts[pos];
+        if (!txt) continue;
+        txt.text = stake > 0 ? fmtCash(stake) : '';
+      }
+    }
+    function onArrowTap(pos /*, e */) {
+      if (scene.spinBtn && scene.spinBtn.busy) return;
+      const stake = player.arrowBets[pos] || 0;
+      const projectedTotal = sumArrowBets(player.arrowBets) + player.bet;
+      if (projectedTotal > player.balance) {
+        flashInsufficientBalance();
+        return;
+      }
+      player.arrowBets[pos] = stake + player.bet;
+      refreshArrowBetVisuals();
+      refreshHUD();
+    }
+    function onArrowClear(pos) {
+      if (scene.spinBtn && scene.spinBtn.busy) return;
+      delete player.arrowBets[pos];
+      refreshArrowBetVisuals();
+      refreshHUD();
+    }
+    function clearAllArrowBets() {
+      if (scene.spinBtn && scene.spinBtn.busy) return;
+      player.arrowBets = {};
+      refreshArrowBetVisuals();
+      refreshHUD();
     }
     function refreshBetControlsEnabled() {
       // Bet controls are disabled while a spin is in flight OR while the
@@ -4754,78 +4853,65 @@ Win = total paytable value × bet of every symbol that exited.`;
     let _chainNextSpin = false;
 
     async function onSpinClick() {
-      // Bug guard: must check the spin button's own busy flag (set by
-      // _setBusy), not a stale player flag — _setBusy doesn't write
-      // player.busy. Without this, mashing spin queues spins.
       if (!scene.spinBtn || scene.spinBtn.busy) return;
-      let wasInFreeSpin = false;
-      if (game.state.freeSpinsBank > 0) {
-        game.state.inFreeSpin = true;
-        game.state.freeSpinsBank -= 1;
-        wasInFreeSpin = true;
-      } else {
-        if (!canAffordSpin()) {
-          flashInsufficientBalance();
-          return;
-        }
-        // Bet is animated DOWN on the balance pill so the deduction reads.
-        player.balance -= player.bet;
-        game.state.inFreeSpin = false;
-        refreshHUD({ animateBalance: true });
+      const totalWager = sumArrowBets(player.arrowBets);
+      if (totalWager <= 0) {
+        // No bets placed — nothing to spin for.
+        return;
       }
+      if (totalWager > player.balance) {
+        flashInsufficientBalance();
+        return;
+      }
+      // Snapshot the bets so the resolution still reflects what was on the
+      // table, even if the player somehow mutates arrowBets mid-flight.
+      const placedBets = { ...player.arrowBets };
+      player.balance -= totalWager;
+      refreshHUD({ animateBalance: true });
       scene.spinBtn._setBusy(true);
-      refreshHUD();   // disable bet controls + dim spin while busy
+      refreshHUD();
 
-      let chainNext = false;
       try {
-        // Snapshot conveyor BEFORE engine mutates it — animator uses
-        // this to detect a newly-spawned token vs. existing ones.
         const beforeTokens = game.state.conveyor.map(t => ({ ...t }));
-        const result = window.RushHour.runSpin(player.bet, game.state);
+        const result = window.RushHour.runSpin(totalWager, game.state);
         await animator.play(result, beforeTokens);
-        currentGrid = result.finalGrid;   // persist for resize repaint
-        const win = result.finalWin;
-        if (win > 0) {
-          player.balance += win;
-          // Big-win celebration: shake + win-pill pulse for hits ≥ 10× bet.
-          if (win >= 10 * player.bet) {
+        currentGrid = result.finalGrid;
+
+        // Tally exits per ring slot from the rushMovePass events.
+        const exitsByPos = {};
+        for (const ev of result.events) {
+          if (ev.type !== 'rushMovePass') continue;
+          for (const m of ev.moves || []) {
+            if (m.kind === 'exit' && m.ringPos != null) {
+              exitsByPos[m.ringPos] = (exitsByPos[m.ringPos] || 0) + 1;
+            }
+          }
+        }
+
+        // Pay out per arrow: stake × odds when ≥1 exit landed there.
+        let totalWin = 0;
+        for (const posKey in placedBets) {
+          const pos = +posKey;
+          const stake = placedBets[posKey];
+          if (exitsByPos[pos]) {
+            totalWin += stake * arrowOddsFor(pos);
+          }
+        }
+        if (totalWin > 0) {
+          player.balance += totalWin;
+          if (totalWin >= 10 * totalWager) {
             shakeStage(8 * (L.gameScale || 1), 0.45);
             pulseWinPill();
           }
         }
-        // Free-spin announcement — fires AFTER cluster animations land.
-        // Combines awards from token activation (`freeSpinsAwarded`) and
-        // scatter trigger / retrigger into a single popup. "Retrigger" if
-        // we were already in the feature when this spin started; "Free
-        // Spins!" if this spin enters the feature fresh.
-        const tokenAwarded   = result.freeSpinsAwarded || 0;
-        const scatterAwarded = (result.scatterTriggered ? window.RushHour.SCATTER_TRIGGER_SPINS : 0)
-                             + (result.scatterRetriggerSpins || 0);
-        const totalAwarded = tokenAwarded + scatterAwarded;
-        if (totalAwarded > 0) {
-          openFreeSpinAnnounceModal(totalAwarded, wasInFreeSpin);
-        }
-        // Auto-chain into the next free spin (BB pattern). Defer the actual
-        // call until AFTER busy is cleared and any popup queue settles, so
-        // a Congratulations / retrigger modal naturally pauses the chain.
-        if (game.state.freeSpinsBank > 0) chainNext = true;
+        // Round done — bets cleared for the next round.
+        player.arrowBets = {};
+        refreshArrowBetVisuals();
       } catch (e) {
         console.error('spin failed:', e);
       } finally {
         scene.spinBtn._setBusy(false);
-        // Animate the win credit onto the balance pill.
         refreshHUD({ animateBalance: true });
-      }
-
-      _chainNextSpin = chainNext;
-      if (_chainNextSpin) {
-        // Wait briefly for any popup to mount before checking the gate.
-        setTimeout(() => {
-          if (!_chainNextSpin) return;
-          if (_openSimpleModalCount > 0) return; // popup blocks chain
-          _chainNextSpin = false;
-          onSpinClick();
-        }, 500);
       }
     }
 
