@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.DS_Store
+.vite/
+*.log
+
+# Claude project-local settings (keep .claude/settings.json under version
+# control — that's the shared permission allowlist).
+.claude/settings.local.json

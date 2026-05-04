@@ -1,0 +1,18 @@
+{
+  "name": "rush-hour",
+  "version": "0.0.1",
+  "description": "Rush Hour-style slot puzzle. Cars on a 5×5 grid carry cardinal arrows; movable cars step toward their arrow each tick and exit when they reach the edge. Right-edge exits pay.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "node scripts/check.mjs"
+  },
+  "dependencies": {
+    "pixi.js": "^7.4.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.10"
+  }
+}
