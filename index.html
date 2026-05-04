@@ -120,60 +120,7 @@
     let RING_SIZE = GAME.ROWS + GAME.COLS;
     let FINISH_POS = RING_SIZE + 1;
 
-    const TOKEN_SPAWN_CHANCE = 0.35;
-    const TOKEN_TYPE_WEIGHTS = [
-      { type: 'multiplier', weight: 44 },
-      { type: 'wild',       weight: 15 },
-      { type: 'freespins',  weight: 10.5 },
-      { type: 'tiny',       weight: 23 },
-      { type: 'mini',       weight:  5 },
-      { type: 'major',      weight:  2.4 },
-      { type: 'grand',      weight:  0.1 },   // ultra rare — Grand-tier carry too much RTP at higher weights
-    ];
-    const TOKEN_TYPE_WEIGHT_TOTAL =
-      TOKEN_TYPE_WEIGHTS.reduce((s, t) => s + t.weight, 0);
-
-    // Multiplier face values rolled per multiplier-token spawn.
-    const MULTIPLIER_VALUES = [
-      { value: 2,   weight: 50 },
-      { value: 3,   weight: 25 },
-      { value: 5,   weight: 14 },
-      { value: 10,  weight:  6 },
-      { value: 25,  weight:  3 },
-      { value: 100, weight:  1.5 },
-      { value: 500, weight:  0.5 },
-    ];
-    const MULTIPLIER_VALUE_WEIGHT_TOTAL =
-      MULTIPLIER_VALUES.reduce((s, m) => s + m.weight, 0);
-
-    const JACKPOT_PAYS = { tiny: 5, mini: 15, major: 100, grand: 200 };
-    const FREESPIN_AWARD = 3;
-
-    // ── Scatter symbol (BB-style) ────────────────────────────────────────────
-    // Special symbol that pays anywhere on count and triggers free spins
-    // separately from the conveyor freespins token. Does NOT participate in
-    // clusters (its colour is a sentinel that no flood-fill matches), DOES
-    // fall under gravity. Capped at SCATTER_MAX_ON_GRID at any time.
-    // Scatter spawn disabled for now (set to 0). Engine code, payouts,
-    // trigger logic, and visual rendering are all intact — bumping this
-    // back to 0.04 re-enables the symbol without further changes.
-    const SCATTER_SPAWN_CHANCE = 0;
-    const SCATTER_MAX_ON_GRID  = 6;
-    const SCATTER_PAYOUTS      = { 4: 3, 5: 5, 6: 100 }; // × bet
-    const SCATTER_TRIGGER_COUNT   = 4;
-    const SCATTER_RETRIGGER_COUNT = 3;
-    const SCATTER_TRIGGER_SPINS   = 10;
-    const SCATTER_RETRIGGER_SPINS = 5;
-
     // ── Helpers ──────────────────────────────────────────────────────────────
-    function pickWeighted(items, totalWeight, weightKey = 'weight') {
-      let r = _rng() * totalWeight;
-      for (const item of items) {
-        r -= item[weightKey];
-        if (r <= 0) return item;
-      }
-      return items[items.length - 1];
-    }
     function weightedColor() {
       let total = 0;
       for (const c of COLORS) total += c.weight;
@@ -213,219 +160,6 @@
     }
     const NEIGHBOURS_4 = [[-1, 0], [1, 0], [0, -1], [0, 1]];
 
-    // ── Cluster detection (4-connected, wilds match any colour) ──────────────
-    function findClusters(grid) {
-      // `seen` blocks COLOURED cells from being re-claimed across floods —
-      // each coloured cell belongs to exactly one cluster. Wild cells are
-      // NEVER added to `seen`, so a wild can appear in multiple clusters'
-      // cells lists in a single detection pass. The cascade loop above
-      // resolves this by paying clusters one at a time and popping their
-      // claimed wilds before the next findClusters call — so each wild
-      // ultimately pays for exactly one cluster (the highest-paying one
-      // that includes it).
-      // `localSeen` is per-flood — it stops a single flood from looping
-      // back on a wild it already walked through.
-      const seen = Array.from({ length: GAME.ROWS }, () => new Array(GAME.COLS).fill(false));
-      const out = [];
-      for (let r = 0; r < GAME.ROWS; r++) {
-        for (let c = 0; c < GAME.COLS; c++) {
-          if (seen[r][c]) continue;
-          const cell = grid[r][c];
-          if (!cell || cell.wild) continue;   // wilds aren't cluster anchors
-          if (cell.scatter)   { seen[r][c] = true; continue; }
-          if (cell.activator) { seen[r][c] = true; continue; }
-          const target = cell.color;
-          const stack = [[r, c]];
-          const cells = [];
-          seen[r][c] = true;
-          const localSeen = new Set();
-          localSeen.add(`${r},${c}`);
-          while (stack.length) {
-            const [cr, cc] = stack.pop();
-            cells.push({ r: cr, c: cc });
-            for (const [dr, dc] of NEIGHBOURS_4) {
-              const nr = cr + dr, nc = cc + dc;
-              if (!inBounds(nr, nc)) continue;
-              const lkey = `${nr},${nc}`;
-              if (localSeen.has(lkey)) continue;
-              const n = grid[nr][nc];
-              if (!n || n.scatter || n.activator) continue;
-              if (n.wild) {
-                // Wilds are claimable by every flood — only `localSeen`
-                // gates them, never the global `seen` array.
-                localSeen.add(lkey);
-                stack.push([nr, nc]);
-              } else if (n.color === target && !seen[nr][nc]) {
-                seen[nr][nc] = true;
-                localSeen.add(lkey);
-                stack.push([nr, nc]);
-              }
-            }
-          }
-          if (cells.length >= GAME.MIN_CLUSTER) {
-            out.push({ color: target, cells });
-          }
-        }
-      }
-      return out;
-    }
-
-    // ── Refill (gravity + spawn from top) ────────────────────────────────────
-    function refill(grid) {
-      const moves = [], spawns = [];
-      // Wild cells are OBSTACLES — they don't fall, and other cells don't
-      // pass through them. The column refills in segments split at each
-      // wild row. Each segment runs the standard "drop existing cells to
-      // the bottom of the segment, spawn new cells at the segment's top".
-      const fillSegment = (c, segTop, segBottom) => {
-        if (segTop > segBottom) return;
-        let writeR = segBottom;
-        for (let r = segBottom; r >= segTop; r--) {
-          const cell = grid[r][c];
-          if (!cell) continue;
-          if (writeR !== r) {
-            grid[writeR][c] = cell;
-            grid[r][c] = null;
-            moves.push({ from: { r, c }, to: { r: writeR, c } });
-          }
-          writeR--;
-        }
-        for (let r = writeR; r >= segTop; r--) {
-          grid[r][c] = spawnAnyCell();
-          spawns.push({ r, c, cell: { ...grid[r][c] } });
-        }
-      };
-
-      for (let c = 0; c < GAME.COLS; c++) {
-        // Find wild row boundaries in this column.
-        const wildRows = [];
-        for (let r = 0; r < GAME.ROWS; r++) {
-          const cell = grid[r][c];
-          if (cell && cell.wild) wildRows.push(r);
-        }
-        if (wildRows.length === 0) {
-          fillSegment(c, 0, GAME.ROWS - 1);
-          continue;
-        }
-        // Process segments between wilds, going bottom-to-top.
-        let segBottom = GAME.ROWS - 1;
-        for (let i = wildRows.length - 1; i >= 0; i--) {
-          const wildR = wildRows[i];
-          fillSegment(c, wildR + 1, segBottom);
-          segBottom = wildR - 1;
-        }
-        // Top segment (above all wilds).
-        fillSegment(c, 0, segBottom);
-      }
-      return { moves, spawns };
-    }
-
-    // ── Conveyor spawn / shift ───────────────────────────────────────────────
-    function maybeSpawnToken(conveyor, bet = 1) {
-      if (_rng() >= TOKEN_SPAWN_CHANCE) return null;
-      // Position 1 must be empty for a fresh token to enter (otherwise the
-      // existing token would be displaced or stacked, neither of which we
-      // want). After the spin's leading shift, pos 1 is normally empty
-      // (whatever was there last spin advanced to pos 2).
-      if (conveyor.some(t => t.pos === 1)) return null;
-      const typePick = pickWeighted(TOKEN_TYPE_WEIGHTS, TOKEN_TYPE_WEIGHT_TOTAL);
-      // spawnBet locks the bet at the moment the token enters the
-      // conveyor. Jackpot tokens pay JACKPOT_PAYS[tier] × spawnBet on
-      // interception, NOT × current bet — so the player can't grow the
-      // bet just because they saw a grand walking the conveyor.
-      const token = { type: typePick.type, pos: 1, spawnBet: bet };
-      if (token.type === 'multiplier') {
-        token.multValue = pickWeighted(MULTIPLIER_VALUES, MULTIPLIER_VALUE_WEIGHT_TOTAL).value;
-      }
-      conveyor.push(token);
-      return token;
-    }
-    function shiftConveyor(conveyor) {
-      const survived = [];
-      const dropped = [];
-      for (const t of conveyor) {
-        const nextPos = t.pos + 1;
-        if (nextPos >= FINISH_POS) dropped.push(t);
-        else { t.pos = nextPos; survived.push(t); }
-      }
-      conveyor.length = 0;
-      conveyor.push(...survived);
-      return dropped;
-    }
-
-    // ── Edge-reach: which ring cell does a slot (r,c) project to? ──────────
-    // Strict alignment — each edge cell reaches exactly one ring slot
-    // (the one directly adjacent to it). The top-right corner cell is
-    // the only cell that reaches two ring slots (one on each edge).
-    //   Top edge   (r == 0):           ring pos (c + 1)            → 1..COLS
-    //   Right edge (c == COLS-1):      ring pos (COLS + 1 + r)     → COLS+1..COLS+ROWS
-    //   Corner (r=0, c=COLS-1): both COLS and COLS+1.
-    function ringCellsForSlot(r, c) {
-      const out = [];
-      if (r === 0)             out.push(c + 1);
-      if (c === GAME.COLS - 1) out.push(GAME.COLS + 1 + r);
-      return out;
-    }
-
-    // ── Token activation ─────────────────────────────────────────────────────
-    // sourceCellRC is the (r,c) of the cluster cell that intercepted this
-    // token. Multiplier-tokens use it to decide the connected-component
-    // scope of the multiplier (per spec: applies to source cluster + any
-    // cluster connected to it via a shared H/V border).
-    function activateToken(token, ctx, sourceCellRC, sourceClusterCells) {
-      switch (token.type) {
-        case 'multiplier':
-          ctx.appliedMults.push({ value: token.multValue, sourceCell: sourceCellRC });
-          return { type: 'multiplier', value: token.multValue, sourceCell: sourceCellRC };
-        case 'wild': {
-          // Wild scatter — 4 OR 5 random cells anywhere on the grid
-          // become wild (uniform 50/50 on count, no duplicates). The
-          // wilds NEVER land on the triggering cluster's cells (since
-          // that cluster is about to pop and would consume them
-          // instantly without value).
-          const excluded = new Set(
-            (sourceClusterCells || []).map(xy => `${xy.r},${xy.c}`)
-          );
-          const allCells = [];
-          const _grid = ctx.grid;
-          for (let rr = 0; rr < GAME.ROWS; rr++) {
-            for (let cc = 0; cc < GAME.COLS; cc++) {
-              if (excluded.has(`${rr},${cc}`)) continue;
-              const cellAt = _grid[rr][cc];
-              if (!cellAt) continue;
-              if (cellAt.wild || cellAt.scatter || cellAt.activator) continue;
-              allCells.push({ r: rr, c: cc });
-            }
-          }
-          const count = Math.min(allCells.length, 4 + (_rng() < 0.5 ? 0 : 1));
-          // Fisher–Yates partial shuffle.
-          for (let i = 0; i < count && i < allCells.length; i++) {
-            const j = i + Math.floor(_rng() * (allCells.length - i));
-            [allCells[i], allCells[j]] = [allCells[j], allCells[i]];
-          }
-          const chosenCells = allCells.slice(0, count);
-          ctx.queuedWildLines.push({ pos: token.pos, chosenCells });
-          return { type: 'wild', pos: token.pos, chosenCells };
-        }
-        case 'freespins':
-          ctx.freeSpinsAwarded += FREESPIN_AWARD;
-          return { type: 'freespins', amount: FREESPIN_AWARD };
-        case 'tiny':
-        case 'mini':
-        case 'major':
-        case 'grand': {
-          const payBet = JACKPOT_PAYS[token.type];           // bet-multiplier
-          const spawnBet = token.spawnBet ?? 1;              // locked at spawn
-          const payAmount = payBet * spawnBet;               // actual currency
-          ctx.jackpotPay += payAmount;
-          return {
-            type: 'jackpot', tier: token.type,
-            payBet, spawnBet, payAmount,
-          };
-        }
-      }
-      return null;
-    }
 
     // ── Spin loop ────────────────────────────────────────────────────────────
     // `state` carries persistent conveyor + free-spin queue across spins.
@@ -479,361 +213,6 @@
           finalGrid: grid,
         };
       }
-
-      const ctx = {
-        appliedMults:    [],
-        queuedWildLines: [],
-        freeSpinsAwarded: 0,
-        jackpotPay:       0,    // accumulated jackpot win in actual currency
-                                // (each jackpot's locked spawnBet × pay tier)
-        intercepts: [],
-        spinChargedMult: 0,     // Activator mode: accumulates multiplier
-                                // value across all cascades; applies to
-                                // the SPIN total at end (not per cluster).
-        grid,                   // live grid reference — activateToken's
-                                // wild case scans the board for spawn
-                                // targets, and `grid` is a runSpin local,
-                                // so it must travel via ctx to be in scope
-                                // wherever activateToken is invoked.
-      };
-
-      // Sticky cell-multiplier overlay (Bloom-Tiles style stamps).
-      const cellMult = Array.from({ length: GAME.ROWS },
-        () => new Array(GAME.COLS).fill(0));
-
-      // Wild persistence rule: a wild cell stays on the grid until either
-      // (a) it's part of a paying cluster — then it pops with the cluster,
-      // or (b) the spin ends. We don't need a separate "permanent wilds"
-      // set: refill's segment logic treats wilds as obstacles, so any
-      // wild that wasn't in a popped cluster stays put naturally.
-      const currentWildPositions = () => {
-        const out = [];
-        for (let r = 0; r < GAME.ROWS; r++) {
-          for (let c = 0; c < GAME.COLS; c++) {
-            if (grid[r][c] && grid[r][c].wild) out.push({ r, c });
-          }
-        }
-        return out;
-      };
-
-      let totalPayout = 0;
-
-      for (let cas = 0; cas < GAME.MAX_CASCADES; cas++) {
-        // 0. Activator-based token interception (mode-specific). For
-        //    `activator` mode: scan grid for Activator symbols whose
-        //    column has a token at the matching ring slot. Tokens
-        //    activate; activators pop from the grid. Hook is undefined
-        //    in modes that don't use this mechanic (no-op).
-        let activatorFiredThisCascade = false;
-        if (mode.interceptViaActivators) {
-          const aIntercepts = mode.interceptViaActivators(grid, state.conveyor, ctx, cas);
-          if (aIntercepts.length > 0) activatorFiredThisCascade = true;
-          for (const ic of aIntercepts) ctx.intercepts.push(ic);
-          // Apply any wilds queued by activator-fired wild tokens so
-          // they participate in this cascade's cluster detection.
-          if (ctx.queuedWildLines.length > 0) {
-            for (const line of ctx.queuedWildLines) {
-              for (const xy of line.chosenCells) {
-                if (grid[xy.r][xy.c]) grid[xy.r][xy.c].wild = true;
-              }
-            }
-            ctx.queuedWildLines.length = 0;
-          }
-        }
-
-        // 1. Initial cluster detection — for token interception only.
-        //    Tokens project off cluster edge cells, so we need clusters
-        //    BEFORE wilds are applied. Don't break early if an activator
-        //    fired this cascade — we still need to emit a 'clusters'
-        //    event so the animator processes those intercepts.
-        let initialClusters = findClusters(grid);
-        if (initialClusters.length === 0 && !activatorFiredThisCascade) break;
-
-        // 2. Token interception — edge-aligned cluster cells project to
-        //    ring positions; if a token sits there, intercept + activate.
-        const intercepted = [];
-        for (const cl of initialClusters) {
-          for (const xy of cl.cells) {
-            const ringPositions = mode.ringCellsForSlot(xy.r, xy.c);
-            for (const ringPos of ringPositions) {
-              const token = state.conveyor.find(t => t.pos === ringPos);
-              if (!token || intercepted.includes(token)) continue;
-              intercepted.push(token);
-              const fired = mode.activateToken(token, ctx, { r: xy.r, c: xy.c }, cl.cells);
-              ctx.intercepts.push({
-                cascade: cas, ringPos,
-                token: { ...token }, fired,
-                clusterCellRC: { r: xy.r, c: xy.c },
-              });
-            }
-          }
-        }
-        for (const t of intercepted) {
-          const i = state.conveyor.indexOf(t);
-          if (i >= 0) state.conveyor.splice(i, 1);
-        }
-
-        // 3. Apply queued wild lines to the grid (mark cells as wild).
-        if (ctx.queuedWildLines.length > 0) {
-          for (const line of ctx.queuedWildLines) {
-            for (const xy of line.chosenCells) {
-              if (grid[xy.r][xy.c]) grid[xy.r][xy.c].wild = true;
-            }
-          }
-          ctx.queuedWildLines.length = 0;
-        }
-
-        // 4. ITERATIVE cluster processing.
-        //    Wilds are claimable by every cluster on EACH detection pass,
-        //    but each wild is consumed when the cluster that claims it
-        //    pops. Re-detect after every pop so the next cluster only
-        //    sees the remaining wilds. Phantom clusters that only met
-        //    MIN_CLUSTER via shared wilds may not survive re-detection
-        //    once the wilds they relied on are gone. (How most cluster-
-        //    pays slots actually treat wilds: each wild cell pays once.)
-        //
-        //    Order: highest-paying cluster first. We compute each
-        //    detected cluster's pay (basePay × cells, with applicable
-        //    multiplier from unclaimed multipliers + max stamp) and pop
-        //    the biggest first. Tie-break by cells.length desc, then by
-        //    first cell coords for determinism.
-
-        // Multipliers waiting to be claimed by their source cluster.
-        // After we've processed the cluster containing a multiplier's
-        // source cell, the multiplier is consumed. Multipliers whose
-        // source cluster doesn't survive re-detection are dropped.
-        const unclaimedMults = ctx.appliedMults.slice();
-        ctx.appliedMults.length = 0;
-
-        // Activator mode: multipliers DON'T apply per-cluster. Each
-        // fired multiplier ADDS its value into the spin-wide charged
-        // pool (ctx.spinChargedMult). Cluster pays this cascade are at
-        // BASE only. The pool is multiplied against the spin total at
-        // the END of the spin (after all cascades). Other modes use
-        // per-cluster source-cell matching.
-        const isActivatorMode = MODE === 'activator';
-        if (isActivatorMode) {
-          for (const m of unclaimedMults) {
-            if (typeof m.value === 'number') ctx.spinChargedMult += m.value;
-          }
-          unclaimedMults.length = 0;   // consumed into spin-wide pool
-        }
-
-        // Compute appliedMult + per-cell pay for a candidate cluster
-        // WITHOUT consuming multipliers. Pure read.
-        const evaluateCluster = (cl) => {
-          let appliedMult;
-          if (isActivatorMode) {
-            appliedMult = 1;   // base only — multiplier applies at spin end
-          } else {
-            appliedMult = 0;
-            for (const m of unclaimedMults) {
-              if (!m.sourceCell) continue;
-              const inside = cl.cells.some(xy =>
-                xy.r === m.sourceCell.r && xy.c === m.sourceCell.c);
-              if (inside) appliedMult += m.value;
-            }
-            if (appliedMult === 0) appliedMult = 1;
-          }
-          const basePay = COLOR_BY_NAME[cl.color].basePay;
-          let perCellSum = 0;
-          for (const xy of cl.cells) {
-            const cellOnGrid = grid[xy.r][xy.c];
-            let effective;
-            if (cellOnGrid && cellOnGrid.wild) {
-              effective = 1;
-            } else {
-              const oldStamp = cellMult[xy.r][xy.c] || 0;
-              const newMult  = appliedMult > 1 ? appliedMult : 0;
-              const m = Math.max(oldStamp, newMult);
-              effective = m > 0 ? m : 1;
-            }
-            perCellSum += basePay * effective;
-          }
-          return { pay: perCellSum, appliedMult };
-        };
-
-        const cascadePaidClusters = [];
-        let cascadePay = 0;
-
-        for (let iter = 0; iter < 200; iter++) {
-          const detected = findClusters(grid);
-          if (detected.length === 0) break;
-
-          // Evaluate each cluster, pick the one paying the most.
-          for (const cl of detected) {
-            const ev = evaluateCluster(cl);
-            cl._pay = ev.pay;
-            cl._appliedMult = ev.appliedMult;
-          }
-          detected.sort((a, b) => {
-            if (b._pay !== a._pay) return b._pay - a._pay;
-            if (b.cells.length !== a.cells.length) return b.cells.length - a.cells.length;
-            // Deterministic tiebreaker for sim reproducibility.
-            const ac = a.cells[0], bc = b.cells[0];
-            if (ac.r !== bc.r) return ac.r - bc.r;
-            return ac.c - bc.c;
-          });
-          const cl = detected[0];
-
-          // Activator mode pays clusters at BASE — multiplier applies
-          // to spin total at end. Other modes consume per-source-cell.
-          let appliedMult;
-          if (isActivatorMode) {
-            appliedMult = 1;
-          } else {
-            appliedMult = 0;
-            for (let i = unclaimedMults.length - 1; i >= 0; i--) {
-              const m = unclaimedMults[i];
-              if (!m.sourceCell) continue;
-              const inside = cl.cells.some(xy =>
-                xy.r === m.sourceCell.r && xy.c === m.sourceCell.c);
-              if (!inside) continue;
-              appliedMult += m.value;
-              unclaimedMults.splice(i, 1);
-            }
-            if (appliedMult === 0) appliedMult = 1;
-          }
-
-          // Per-cell pay (recomputed; same number as evaluateCluster gave).
-          const basePay = COLOR_BY_NAME[cl.color].basePay;
-          let perCellSum = 0;
-          for (const xy of cl.cells) {
-            const cellOnGrid = grid[xy.r][xy.c];
-            let effective;
-            if (cellOnGrid && cellOnGrid.wild) {
-              effective = 1;
-            } else {
-              const oldStamp = cellMult[xy.r][xy.c] || 0;
-              const newMult  = appliedMult > 1 ? appliedMult : 0;
-              const m = Math.max(oldStamp, newMult);
-              effective = m > 0 ? m : 1;
-            }
-            perCellSum += basePay * effective;
-          }
-          cascadePay += perCellSum;
-
-          // Stamp non-wild cells if this cluster got a multiplier.
-          // Activator mode: NO stamping. The multiplier is cascade-wide
-          // and consumed at the end of this cascade — it doesn't stick
-          // to cells across cascades.
-          if (!isActivatorMode && appliedMult > 1) {
-            for (const xy of cl.cells) {
-              const cellOnGrid = grid[xy.r][xy.c];
-              if (!cellOnGrid || cellOnGrid.wild) continue;
-              const existing = cellMult[xy.r][xy.c] || 0;
-              cellMult[xy.r][xy.c] = Math.max(existing, appliedMult);
-            }
-          }
-
-          // Tag cells with wild state for the animator.
-          const taggedCells = cl.cells.map(xy => ({
-            r: xy.r, c: xy.c,
-            wild: !!(grid[xy.r] && grid[xy.r][xy.c] && grid[xy.r][xy.c].wild),
-          }));
-
-          cascadePaidClusters.push({
-            color: cl.color,
-            cells: taggedCells,
-            basePay: basePay * cl.cells.length,
-            pay: perCellSum,
-            appliedMult,
-          });
-
-          // Pop cluster cells (including any wilds it claimed). The next
-          // iteration's findClusters runs against this smaller grid, so
-          // those wilds can't pay again.
-          for (const xy of cl.cells) {
-            grid[xy.r][xy.c] = null;
-          }
-        }
-
-        // Drop any multipliers whose source cluster didn't survive.
-        ctx.appliedMults.length = 0;
-
-        totalPayout += cascadePay;
-
-        events.push({
-          type: 'clusters',
-          cascadeIndex: cas,
-          clusters: cascadePaidClusters,
-          cascadePay,
-        });
-
-        // ── Refill ──
-        const { moves, spawns } = refill(grid);
-        events.push({
-          type: 'refill', cascadeIndex: cas,
-          moves: moves.slice(), spawns: spawns.slice(),
-          stickyWilds: currentWildPositions(),
-          gridAfter: cloneGrid(grid),
-        });
-      }
-
-      // 3. Activator-mode spin-charged multiplier — applies to the SPIN
-      //    total after all cascades. Multiplies totalPayout by the sum
-      //    of all activator-fired multiplier values; emits a
-      //    'multiplierApply' event so the animator can play the
-      //    "charge slams onto the win pill" beat. If no clusters paid
-      //    this spin, the multiplier fizzles silently (no event).
-      if (MODE === 'activator' && ctx.spinChargedMult > 1 && totalPayout > 0) {
-        const baseTotal   = totalPayout;
-        const bonusAmount = baseTotal * (ctx.spinChargedMult - 1);
-        totalPayout += bonusAmount;
-        events.push({
-          type: 'multiplierApply',
-          mult: ctx.spinChargedMult,
-          baseAmount:  baseTotal,
-          bonusAmount: bonusAmount,
-        });
-      }
-
-      // 4. (Conveyor shift now runs at the START of runSpin, not here —
-      //     so this spin's cluster intercepts use the same positions the
-      //     player sees during the cascade animation.)
-
-      // 4. Scatter end-of-spin: count, pay, and trigger / retrigger.
-      _scattersOnGrid = countScattersIn(grid);
-      const scatterCount = _scattersOnGrid;
-      const scatterPayMult = SCATTER_PAYOUTS[scatterCount] ?? (
-        // Cap at the highest defined tier; e.g. 7+ scatters pay the 6 rate.
-        scatterCount > 6 ? SCATTER_PAYOUTS[6] : 0
-      );
-      const scatterPay = scatterPayMult * bet;
-      let scatterTriggered = false;
-      let scatterRetriggerSpins = 0;
-      if (!state.inFreeSpin && scatterCount >= SCATTER_TRIGGER_COUNT) {
-        scatterTriggered = true;
-        state.freeSpinsBank += SCATTER_TRIGGER_SPINS;
-      } else if (state.inFreeSpin && scatterCount >= SCATTER_RETRIGGER_COUNT) {
-        scatterRetriggerSpins = SCATTER_RETRIGGER_SPINS;
-        state.freeSpinsBank += SCATTER_RETRIGGER_SPINS;
-      }
-
-      if (ctx.freeSpinsAwarded > 0) state.freeSpinsBank += ctx.freeSpinsAwarded;
-
-      const clusterWin = totalPayout * bet;
-      const jackpotWin = ctx.jackpotPay;   // already in currency (locked spawn-bets)
-      const finalWin = clusterWin + jackpotWin + scatterPay;
-
-      events.push({
-        type: 'spinEnd',
-        clusterWin, jackpotWin, scatterPay, finalWin,
-        droppedTokens: dropped,
-        freeSpinsAwarded: ctx.freeSpinsAwarded,
-        intercepts: ctx.intercepts,
-        scatterCount, scatterTriggered, scatterRetriggerSpins,
-      });
-
-      return {
-        events, bet,
-        clusterWin, jackpotWin, scatterPay, finalWin,
-        intercepts: ctx.intercepts,
-        droppedTokens: dropped,
-        freeSpinsAwarded: ctx.freeSpinsAwarded,
-        scatterCount, scatterTriggered, scatterRetriggerSpins,
-        finalGrid: grid,
-      };
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -897,36 +276,17 @@
     // call sites already using `getModeDef().X` see the canonical values.
 
     const MODE_HOOKS_DEFAULT = {
-      // Identity (overridden per mode)
       key: '',
       name: '',
-
-      // ── Config (mirror of top-level constants) ────────────────────────
       GAME, RING_SIZE, FINISH_POS,
       COLORS, COLOR_BY_NAME,
-      TOKEN_SPAWN_CHANCE, TOKEN_TYPE_WEIGHTS, TOKEN_TYPE_WEIGHT_TOTAL,
-      MULTIPLIER_VALUES, MULTIPLIER_VALUE_WEIGHT_TOTAL,
-      JACKPOT_PAYS, FREESPIN_AWARD,
-      SCATTER_SPAWN_CHANCE, SCATTER_MAX_ON_GRID, SCATTER_PAYOUTS,
-      SCATTER_TRIGGER_COUNT, SCATTER_RETRIGGER_COUNT,
-      SCATTER_TRIGGER_SPINS, SCATTER_RETRIGGER_SPINS,
-
-      // ── Topology ──────────────────────────────────────────────────────
-      ringCellsForSlot(r, c) { return ringCellsForSlot(r, c); },
       isValidCell(r, c) { return inBounds(r, c); },
-
-      // ── Spawn / conveyor (defaults dispatch to closure functions) ─────
-      spawnSymbol() { return spawnSymbol(); },
-      spawnAnyCell() { return spawnAnyCell(); },
-      maybeSpawnToken(conveyor, bet) { return maybeSpawnToken(conveyor, bet); },
-      shiftConveyor(conveyor) { return shiftConveyor(conveyor); },
-
-      // ── Token activation ──────────────────────────────────────────────
-      activateToken(token, ctx, sourceCellRC, sourceClusterCells) {
-        return activateToken(token, ctx, sourceCellRC, sourceClusterCells);
-      },
-
-      // ── Optional UI hook (per-mode scene widget) ──────────────────────
+      // Defaults are no-ops; rush mode overrides what it needs.
+      ringCellsForSlot()     { return []; },
+      spawnSymbol()          { return spawnSymbol(); },
+      spawnAnyCell()         { return spawnAnyCell(); },
+      maybeSpawnToken()      { return null; },
+      shiftConveyor()        { return []; },
       buildSceneFeatureWidget(_scene, _app, _ctx) {},
     };
 
@@ -1184,79 +544,26 @@ Win = total paytable value × bet of every symbol that exited.`;
 
     // ── Expose ───────────────────────────────────────────────────────────────
     // Wraps runSpin so we keep a reference to the LAST result on
-    // window.TrailCatcher._debug for inspection from the console.
+    // window.RushHour._debug for inspection from the console.
     function runSpinDebug(bet, state) {
       const wasFree = !!(state && state.inFreeSpin);
       const r = runSpin(bet, state);
-      // Update stats — paid spins add to wager; all spins add to win/hit.
       stats.spins += 1;
       if (!wasFree) stats.totalWager += bet;
       stats.totalWin += r.finalWin;
       if (r.finalWin > 0) stats.hitCount += 1;
       if (r.finalWin > stats.maxWin) stats.maxWin = r.finalWin;
-      // Log detected clusters per cascade so the user can verify what
-      // the engine considered a winning cluster.
-      const clusterEvents = r.events.filter(e => e.type === 'clusters');
-      if (clusterEvents.length === 0) {
-        // Helpful: if no clusters paid, dump the spawned grid + colour
-        // grid so we can sanity-check from outside.
-        const spawn = r.events.find(e => e.type === 'spawn');
-        if (spawn) {
-          const colorGrid = spawn.grid.map(row => row.map(c => c ? (c.wild ? 'WILD' : c.color) : '.'));
-          console.log('[TrailCatcher] spin: no clusters paid. Grid:');
-          console.table(colorGrid);
-        }
-      } else {
-        console.log('[TrailCatcher] spin paid', clusterEvents.length, 'cluster events:');
-        for (const ev of clusterEvents) {
-          console.log(
-            `  cascade ${ev.cascadeIndex}:`,
-            ev.clusters.map(cl => `${cl.color}×${cl.cells.length}=${cl.pay.toFixed(2)}`).join(', ')
-          );
-          // Diagnostic: which cluster cells reach which ring positions,
-          // and whether a token sits at any of those positions. Helps
-          // verify activation when something LOOKS like it should fire
-          // but didn't.
-          for (const cl of ev.clusters) {
-            const edgeCells = cl.cells.filter(xy => xy.r === 0 || xy.c === GAME.COLS - 1);
-            if (edgeCells.length === 0) {
-              console.log(`    ${cl.color}: no edge cells (no token activation possible from this cluster)`);
-            } else {
-              const edgeProj = edgeCells.map(xy => `(${xy.r},${xy.c})→[${ringCellsForSlot(xy.r, xy.c).join(',')}]`).join(' ');
-              console.log(`    ${cl.color}: edge cells project to → ${edgeProj}`);
-            }
-          }
-        }
-      }
-      const cascadeIntercepts = r.intercepts || [];
-      if (cascadeIntercepts.length === 0) {
-        // Show what tokens were on the conveyor — helpful when player expected an activation.
-        const snap = r.events.find(e => e.type === 'conveyorSnapshot');
-        const tokens = snap?.tokens || [];
-        if (tokens.length > 0) {
-          console.log('[TrailCatcher] tokens on conveyor (none activated this spin):',
-            tokens.map(t => `pos ${t.pos}=${t.type}${t.multValue ? `(${t.multValue}×)` : ''}`).join(', '));
-        }
-      } else {
-        console.log('[TrailCatcher] tokens activated:',
-          cascadeIntercepts.map(ic => `pos ${ic.ringPos}=${ic.token.type}${ic.token.multValue ? `(${ic.token.multValue}×)` : ''} via cell (${ic.clusterCellRC.r},${ic.clusterCellRC.c})`).join('; '));
-      }
-      window.TrailCatcher._debug = { lastResult: r };
+      window.RushHour._debug = { lastResult: r };
       return r;
     }
 
-    window.TrailCatcher = {
+    window.RushHour = {
       runSpin: runSpinDebug,
       _runSpinRaw: runSpin,
       setRng, makeSeededRng,
       GAME, COLORS, COLOR_BY_NAME,
       RING_SIZE, FINISH_POS,
-      TOKEN_SPAWN_CHANCE, TOKEN_TYPE_WEIGHTS,
-      MULTIPLIER_VALUES, JACKPOT_PAYS, FREESPIN_AWARD,
-      SCATTER_PAYOUTS, SCATTER_TRIGGER_COUNT, SCATTER_RETRIGGER_COUNT,
-      SCATTER_TRIGGER_SPINS, SCATTER_RETRIGGER_SPINS,
-      generateGrid, findClusters, refill,
-      ringCellsForSlot,
+      generateGrid,
       stats, resetStats,
       MODE_DEF, MODE_HOOKS_DEFAULT, getModeDef, setMode,
       _debug: {},
@@ -1313,13 +620,13 @@ Win = total paytable value × bet of every symbol that exited.`;
     }
     window.addEventListener('error', (e) => {
       const err = e.error || e.message || e;
-      console.error('[TrailCatcher] window error:', err);
-      _showCrashBanner('TrailCatcher crashed', (err && err.stack) || String(err));
+      console.error('[RushHour] window error:', err);
+      _showCrashBanner('RushHour crashed', (err && err.stack) || String(err));
     });
     window.addEventListener('unhandledrejection', (e) => {
       const reason = e.reason || e;
-      console.error('[TrailCatcher] unhandled rejection:', reason);
-      _showCrashBanner('TrailCatcher: unhandled rejection', (reason && reason.stack) || String(reason));
+      console.error('[RushHour] unhandled rejection:', reason);
+      _showCrashBanner('RushHour: unhandled rejection', (reason && reason.stack) || String(reason));
     });
 
     // ── Player + UI state ────────────────────────────────────────────────────
@@ -1880,7 +1187,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         return c;
       }
 
-      const colorHex = colorToUint(window.TrailCatcher.COLOR_BY_NAME[cell.color].hex);
+      const colorHex = colorToUint(window.RushHour.COLOR_BY_NAME[cell.color].hex);
       // Rush Hour: render the symbol as a VEHICLE chosen by the symbol's
       // pay tier (low pay = small car; high pay = lorry). Vehicle points
       // in the symbol's cardinal arrow direction; a small arrow chip
@@ -2149,8 +1456,8 @@ Win = total paytable value × bet of every symbol that exited.`;
       // Two-line labels: a short top tag (TYPE) + a value/payout below.
       // Wild has only the WILD tag (no payout). Freespins shows the
       // award. Jackpot tiers show their multiplier (e.g. 100×).
-      const FS = window.TrailCatcher.FREESPIN_AWARD;
-      const JP = window.TrailCatcher.JACKPOT_PAYS;
+      const FS = window.RushHour.FREESPIN_AWARD;
+      const JP = window.RushHour.JACKPOT_PAYS;
       // Visual identity per type. `fill` is the bright core, `rim` is a
       // contrasting bright accent ring. Jackpot tiers wear a gold rim
       // (signals "money"); multiplier / wild / freespins wear rims
@@ -2691,7 +1998,7 @@ Win = total paytable value × bet of every symbol that exited.`;
       // so the "biggest pays" are visually emphasized (BB pattern).
       const paytableContent = new PIXI.Container();
       modal.addChild(paytableContent);
-      const COLORS = [...window.TrailCatcher.COLORS].sort((a, b) => b.basePay - a.basePay);
+      const COLORS = [...window.RushHour.COLORS].sort((a, b) => b.basePay - a.basePay);
       const rowGap = 6 * scale;
       const rowW = panelW - 48 * scale;
       const rowX = panelX + 24 * scale;
@@ -2755,7 +2062,7 @@ Win = total paytable value × bet of every symbol that exited.`;
       modal.addChild(rulesContent);
       // Per-mode rules text — pulled from the active mode's hook so each
       // mode shows its own description.
-      const rulesText = window.TrailCatcher.getModeDef().getRulesText?.()
+      const rulesText = window.RushHour.getModeDef().getRulesText?.()
         ?? 'No rules available for this mode.';
       const rulesBody = new PIXI.Text(rulesText, {
         fontFamily: 'Arial, sans-serif',
@@ -3432,7 +2739,7 @@ Win = total paytable value × bet of every symbol that exited.`;
       // Per-mode scene widget hook (BB-style). Future modes can register
       // a `buildSceneFeatureWidget` that adds mode-specific UI (e.g. a
       // multiplier ladder, a pot-fill bar) without modifying buildScene.
-      window.TrailCatcher.getModeDef().buildSceneFeatureWidget?.(scene, app, { L });
+      window.RushHour.getModeDef().buildSceneFeatureWidget?.(scene, app, { L });
 
       // Sync HUD state (gating, free-spin banner) on first paint AND every
       // rebuild so resize-during-feature still shows the correct controls.
@@ -3471,7 +2778,7 @@ Win = total paytable value × bet of every symbol that exited.`;
     // of the canvas. Low-contrast so it doesn't compete with the HUD pills.
     function updateRtpText() {
       if (!scene.rtpText) return;
-      const s = window.TrailCatcher.stats;
+      const s = window.RushHour.stats;
       const pct = (s.rtp * 100).toFixed(2);
       scene.rtpText.text = `RTP ${pct}%   |   Spins ${s.spins}   |   Hit ${(s.hitRate * 100).toFixed(1)}%   |   Avg win ${s.avgWin.toFixed(2)}`;
     }
@@ -3531,7 +2838,7 @@ Win = total paytable value × bet of every symbol that exited.`;
     const FEATURE_COST_MULT = 100;
     function featureCost() { return player.bet * FEATURE_COST_MULT; }
     function featureSpinCount() {
-      return window.TrailCatcher.SCATTER_TRIGGER_SPINS || 10;
+      return window.RushHour.SCATTER_TRIGGER_SPINS || 10;
     }
     function canBuyFeature() {
       return !inFreeSpinFeature() && player.balance >= featureCost();
@@ -5582,7 +4889,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         // Snapshot conveyor BEFORE engine mutates it — animator uses
         // this to detect a newly-spawned token vs. existing ones.
         const beforeTokens = game.state.conveyor.map(t => ({ ...t }));
-        const result = window.TrailCatcher.runSpin(player.bet, game.state);
+        const result = window.RushHour.runSpin(player.bet, game.state);
         await animator.play(result, beforeTokens);
         currentGrid = result.finalGrid;   // persist for resize repaint
         const win = result.finalWin;
@@ -5600,7 +4907,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         // we were already in the feature when this spin started; "Free
         // Spins!" if this spin enters the feature fresh.
         const tokenAwarded   = result.freeSpinsAwarded || 0;
-        const scatterAwarded = (result.scatterTriggered ? window.TrailCatcher.SCATTER_TRIGGER_SPINS : 0)
+        const scatterAwarded = (result.scatterTriggered ? window.RushHour.SCATTER_TRIGGER_SPINS : 0)
                              + (result.scatterRetriggerSpins || 0);
         const totalAwarded = tokenAwarded + scatterAwarded;
         if (totalAwarded > 0) {
@@ -5634,7 +4941,7 @@ Win = total paytable value × bet of every symbol that exited.`;
     {
       // Generate the initial grid ONCE; buildScene reads from currentGrid
       // every time so symbols don't disappear on resize.
-      currentGrid = window.TrailCatcher.generateGrid();
+      currentGrid = window.RushHour.generateGrid();
     }
     buildScene();
 

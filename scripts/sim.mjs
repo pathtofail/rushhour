@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Trail Catcher RTP / variance sim.
+// Rush Hour RTP / variance sim.
 //
 // Extracts the inline engine from index.html, stubs the PIXI / DOM
 // globals it references for boot-up, evaluates the engine in a vm
@@ -9,13 +9,6 @@
 
 import fs from 'node:fs';
 import vm from 'node:vm';
-
-// CLI: spins=10000 bet=1 seed=42 mode=base|allAround|activator
-const ARG_MODE = (process.argv[5] || 'base').trim();
-if (!['base', 'allAround', 'activator', 'rush'].includes(ARG_MODE)) {
-  console.error(`Unknown mode "${ARG_MODE}" — expected base | allAround | activator | rush`);
-  process.exit(1);
-}
 
 const HTML = fs.readFileSync('index.html', 'utf8');
 const blocks = [...HTML.matchAll(/<script(?:\s+type=["']module["'])?[^>]*>([\s\S]*?)<\/script>/g)];
@@ -133,12 +126,7 @@ const sandbox = {
   },
   navigator: { userAgent: 'sim' },
   performance: { now: () => Date.now() },
-  // Pin mode via localStorage stub so the engine's load-time mode
-  // resolver picks up our requested mode.
-  localStorage: {
-    getItem: (k) => (k === 'trail_catcher_mode' ? ARG_MODE : null),
-    setItem: noop, removeItem: noop,
-  },
+  localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
   __ready: () => _ready(),
   __setError: (e) => { _error = e; },
 };
@@ -178,9 +166,9 @@ if (_error) {
   process.exit(1);
 }
 
-const TrailCatcher = sandbox.window.TrailCatcher;
-if (!TrailCatcher) {
-  console.error('TrailCatcher not exposed on window — engine likely failed to load');
+const Game = sandbox.window.RushHour;
+if (!Game) {
+  console.error('RushHour not exposed on window — engine likely failed to load');
   process.exit(1);
 }
 
@@ -189,9 +177,9 @@ const N    = parseInt(process.argv[2] || '10000', 10);
 const BET  = parseFloat(process.argv[3] || '1');
 const SEED = parseInt(process.argv[4] || '42', 10);
 
-TrailCatcher.setRng(TrailCatcher.makeSeededRng(SEED));
+Game.setRng(Game.makeSeededRng(SEED));
 
-console.log(`\nSimulating ${N} spins · bet=${BET} · seed=${SEED} · mode=${ARG_MODE}\n`);
+console.log(`\nSimulating ${N} spins · bet=${BET} · seed=${SEED}\n`);
 const t0 = Date.now();
 
 // Persistent conveyor state across all spins (token shift carries spin to spin).
@@ -248,7 +236,7 @@ while (spinIdx < N) {
   const wasInFreeSpin = state.inFreeSpin;
   if (!wasInFreeSpin) totalPaidWagered += BET;
 
-  const r = TrailCatcher.runSpin(BET, state);
+  const r = Game.runSpin(BET, state);
   totalCluster += r.clusterWin;
   totalJackpot += r.jackpotWin;
   returns[spinIdx] = r.finalWin;
