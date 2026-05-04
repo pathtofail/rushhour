@@ -180,33 +180,33 @@ function mirrorSlot(pos) {
   return pos;
 }
 
-console.log('pos | edge   | P(raw)  | P(sym)  | odds (0.95/P_sym) | E[exits]');
-console.log('----|--------|---------|---------|-------------------|---------');
-const pSym = new Array(RING_SIZE + 1).fill(0);
+// PER-EXIT payout model: each car that exits through a staked arrow
+// pays. odds_i = 0.95 / E[exits_i] (symmetrised across mirror pairs).
+console.log('pos | edge   | E[exits raw] | E[exits sym] | odds (0.95/E_sym)');
+console.log('----|--------|--------------|--------------|------------------');
+const eSym = new Array(RING_SIZE + 1).fill(0);
 const odds = {};
 for (let pos = 1; pos <= RING_SIZE; pos++) {
-  const pa = hits[pos] / N;
-  const pb = hits[mirrorSlot(pos)] / N;
-  pSym[pos] = (pa + pb) / 2;
-  const o = pSym[pos] > 0 ? TARGET / pSym[pos] : 0;
+  const ea = counts[pos] / N;
+  const eb = counts[mirrorSlot(pos)] / N;
+  eSym[pos] = (ea + eb) / 2;
+  const o = eSym[pos] > 0 ? TARGET / eSym[pos] : 0;
   odds[pos] = +o.toFixed(3);
 }
 for (let pos = 1; pos <= RING_SIZE; pos++) {
-  const p = hits[pos] / N;
   const e = counts[pos] / N;
   console.log(
-    `${String(pos).padStart(3)} | ${edgeName(pos).padEnd(6)} | ${p.toFixed(4)} | ${pSym[pos].toFixed(4)} | ${odds[pos].toFixed(3).padStart(17)} | ${e.toFixed(3)}`
+    `${String(pos).padStart(3)} | ${edgeName(pos).padEnd(6)} | ${e.toFixed(4).padStart(12)} | ${eSym[pos].toFixed(4).padStart(12)} | ${odds[pos].toFixed(3).padStart(17)}`
   );
 }
 
-// Verify RTP under symmetric odds with a uniform stake on every arrow.
-// (Uses the RAW measured probabilities — the noise WITHIN a mirror pair
-// cancels out across the pair, so per-pair RTP is exactly 0.95 in
-// expectation; the printed number measures it on this run.)
+// Verify all-arrows uniform-stake RTP under per-exit payout: a single
+// stake on each arrow returns sum_i(E[exits_i] × odds_i) per round; the
+// per-arrow RTP equals 0.95 by construction (each odds_i = 0.95 / E_sym).
 let expectedReturn = 0;
 for (let pos = 1; pos <= RING_SIZE; pos++) {
-  const p = hits[pos] / N;
-  expectedReturn += p * odds[pos];
+  const e = counts[pos] / N;
+  expectedReturn += e * odds[pos];
 }
 const rtp = expectedReturn / RING_SIZE;
 console.log(`\nAll-arrows uniform-stake RTP: ${(rtp * 100).toFixed(2)}%`);
