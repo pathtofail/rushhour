@@ -196,51 +196,8 @@
     // Only cars exiting through this edge pay. Mirrors the "designated
     // exit" mechanic from the original Rush Hour puzzle.
     const RUSH_PAY_EDGE = 'right';
-    function spawnScatterCell() {
-      return { color: '__scatter__', scatter: true, wild: false };
-    }
-    // Activator symbol — used by the `activator` mode. No payout, no
-    // cluster matching; activates a conveyor token if the activator
-    // lands in the column with that token at the matching ring slot.
-    function spawnActivatorCell() {
-      return { color: '__activator__', activator: true, wild: false };
-    }
-    const ACTIVATOR_SPAWN_CHANCE = 0.025;  // per-cell roll on spawn — rare event
-    const ACTIVATOR_MAX_ON_GRID  = 3;
-    let _activatorsOnGrid = 0;
-    // Live count of scatters currently visible on the grid. Engine mutates
-    // this on every spawn / cluster removal / refill so the SCATTER_MAX_ON_GRID
-    // cap can be honoured without scanning the grid each cell-spawn.
-    let _scattersOnGrid = 0;
-    function spawnAnyCell() {
-      // Rush Hour: every cell carries a cardinal arrow. No scatters,
-      // no activators, no wilds at spawn — the puzzle only deals with
-      // coloured symbols + arrows.
-      if (MODE === 'rush') return spawnRushSymbol();
-      // Activator mode: roll for an activator first (gated by on-grid cap).
-      if (MODE === 'activator'
-          && _activatorsOnGrid < ACTIVATOR_MAX_ON_GRID
-          && _rng() < ACTIVATOR_SPAWN_CHANCE) {
-        _activatorsOnGrid++;
-        return spawnActivatorCell();
-      }
-      // Roll for a scatter symbol; gated by the on-grid cap.
-      if (_scattersOnGrid < SCATTER_MAX_ON_GRID && _rng() < SCATTER_SPAWN_CHANCE) {
-        _scattersOnGrid++;
-        return spawnScatterCell();
-      }
-      return spawnSymbol();
-    }
-    function countScattersIn(grid) {
-      let n = 0;
-      for (let r = 0; r < GAME.ROWS; r++) {
-        for (let c = 0; c < GAME.COLS; c++) if (grid[r][c] && grid[r][c].scatter) n++;
-      }
-      return n;
-    }
+    function spawnAnyCell() { return spawnRushSymbol(); }
     function generateGrid() {
-      _scattersOnGrid = 0;
-      _activatorsOnGrid = 0;
       const g = [];
       for (let r = 0; r < GAME.ROWS; r++) {
         const row = [];
@@ -973,260 +930,6 @@
       buildSceneFeatureWidget(_scene, _app, _ctx) {},
     };
 
-    // ── Mode: Base Gameplay ──────────────────────────────────────────────
-    // 7×7 grid + L-conveyor + current token set.
-    const HOOKS_BASE = { ...MODE_HOOKS_DEFAULT };
-    const RULES_BASE =
-`The Grid
-• 7×7 slot grid wrapped by an L-shaped conveyor across the top edge
-  and right edge — 14 collectible spots plus a finish.
-
-Cluster Pays
-• 5 or more matching symbols touching horizontally or vertically pay.
-• Each cell in a cluster pays the value shown for that symbol on the
-  Paytable tab.
-• Wins clear, the grid refills from above, and cascades chain.
-
-The Conveyor
-• Each spin, a token may step onto the conveyor at the top-left.
-• Every spin, every token on the conveyor takes one step toward the
-  finish. Tokens that reach the finish are lost.
-• Cluster cells on the top row or right column reach out and
-  intercept the token next to them — that token activates.
-
-Token Effects
-• MULTIPLIER — stamps every cluster cell with the multiplier value.
-  Stamps stick to the grid for the rest of the spin and apply to
-  whatever symbol later lands on those cells.
-• WILD — places 4 or 5 wild cells at random spots on the grid.
-  Wilds substitute for any symbol; each wild contributes to one
-  cluster, then disappears with it.
-• FREE SPINS — adds 3 free spins, played automatically.
-• TINY / MINI / MAJOR / GRAND — instant cash payout. Tokens lock the
-  bet at the moment they spawn, so the payout is computed against
-  the bet that was in play when the token entered the conveyor.
-
-Win = total cluster pays + token effects.`;
-
-    // ── Mode: All Around ─────────────────────────────────────────────────
-    // 6×6 grid + 4-sided conveyor with 3 corner ×2 markers. Tokens that
-    // pass a corner upgrade by one tier — wild scatter count, multiplier
-    // value, and free-spin award all double per corner crossed.
-    //
-    // Conveyor positions (24 collectible + 1 finish):
-    //   pos  1.. 6 → top edge, columns 0..5 left-to-right
-    //   pos  7..12 → right edge, rows 0..5 top-to-bottom
-    //   pos 13..18 → bottom edge, columns 5..0 right-to-left
-    //   pos 19..24 → left edge, rows 5..0 bottom-to-top
-    //   pos 25     → finish (destroyer at left of (0,0))
-    //
-    // Corner crossings (between sides) where a token's tier upgrades:
-    //   pos 6 → 7   (top-right corner)
-    //   pos 12 → 13 (bottom-right corner)
-    //   pos 18 → 19 (bottom-left corner)
-    //   (no upgrade between 24 and 25 — token is destroyed instead)
-    const ALL_AROUND_GAME = { ROWS: 6, COLS: 6, MIN_CLUSTER: 5, MAX_CASCADES: 30 };
-    const ALL_AROUND_RING_SIZE  = 24;
-    const ALL_AROUND_FINISH_POS = 25;
-    const ALL_AROUND_CORNER_CROSSINGS = new Set(['6->7', '12->13', '18->19']);
-    function ringCellsForSlot_AllAround(r, c) {
-      const out = [];
-      const R = GAME.ROWS, C = GAME.COLS;
-      if (r === 0)        out.push(c + 1);              // top:    1..C
-      if (c === C - 1)    out.push(C + 1 + r);          // right:  C+1..C+R
-      if (r === R - 1)    out.push(C + R + 1 + (C - 1 - c));  // bottom (reverse): C+R+1..2C+R
-      if (c === 0)        out.push(2 * C + R + 1 + (R - 1 - r)); // left  (reverse): 2C+R+1..2C+2R
-      return out;
-    }
-    // Tier-based upgrade math.
-    //   multiplier: value × 2^tier
-    //   freespins:  base award (2) × 2^tier   →  2 / 4 / 8 / 16
-    //   wild:       count by tier             →  2 / 3 / 4 / 6
-    function allAroundWildCount(tier /*, rng */) {
-      if (tier <= 0) return 2;
-      if (tier === 1) return 3;
-      if (tier === 2) return 4;
-      return 6;                                          // tier 3 (MEGA)
-    }
-    function activateToken_AllAround(token, ctx, sourceCellRC, sourceClusterCells) {
-      const tier = token.tier || 0;
-      const factor = 1 << tier;   // 2^tier
-      switch (token.type) {
-        case 'multiplier': {
-          const upValue = token.multValue * factor;
-          ctx.appliedMults.push({ value: upValue, sourceCell: sourceCellRC });
-          return { type: 'multiplier', value: upValue, sourceCell: sourceCellRC, tier };
-        }
-        case 'wild': {
-          const excluded = new Set(
-            (sourceClusterCells || []).map(xy => `${xy.r},${xy.c}`)
-          );
-          const allCells = [];
-          const _grid = ctx.grid;
-          for (let rr = 0; rr < GAME.ROWS; rr++) {
-            for (let cc = 0; cc < GAME.COLS; cc++) {
-              if (excluded.has(`${rr},${cc}`)) continue;
-              const cellAt = _grid[rr][cc];
-              if (!cellAt) continue;
-              if (cellAt.wild || cellAt.scatter || cellAt.activator) continue;
-              allCells.push({ r: rr, c: cc });
-            }
-          }
-          const count = Math.min(allCells.length, allAroundWildCount(tier, _rng));
-          for (let i = 0; i < count && i < allCells.length; i++) {
-            const j = i + Math.floor(_rng() * (allCells.length - i));
-            [allCells[i], allCells[j]] = [allCells[j], allCells[i]];
-          }
-          const chosenCells = allCells.slice(0, count);
-          ctx.queuedWildLines.push({ pos: token.pos, chosenCells, tier });
-          return { type: 'wild', pos: token.pos, chosenCells, tier };
-        }
-        case 'freespins': {
-          const award = 2 * factor;   // tier 0 = 2, tier 1 = 4, etc.
-          ctx.freeSpinsAwarded += award;
-          return { type: 'freespins', amount: award, tier };
-        }
-        case 'tiny':
-        case 'mini':
-        case 'major':
-        case 'grand': {
-          // All Around jackpots ALSO double per corner crossed (×2 per
-          // tier). Spawn-bet still locked at spawn time.
-          const payBet = JACKPOT_PAYS[token.type] * factor;
-          const spawnBet = token.spawnBet ?? 1;
-          const payAmount = payBet * spawnBet;
-          ctx.jackpotPay += payAmount;
-          return { type: 'jackpot', tier: token.type, payBet, spawnBet, payAmount };
-        }
-      }
-      return null;
-    }
-    function shiftConveyor_AllAround(conveyor) {
-      const survived = [];
-      const dropped = [];
-      const _dbgRows = [];
-      for (const t of conveyor) {
-        const nextPos = t.pos + 1;
-        if (nextPos >= FINISH_POS) {
-          _dbgRows.push({ type: t.type, from: t.pos, to: 'DROP', corner: false, tier: t.tier || 0 });
-          dropped.push(t);
-        } else {
-          const key = `${t.pos}->${nextPos}`;
-          const isCorner = ALL_AROUND_CORNER_CROSSINGS.has(key);
-          if (isCorner) {
-            t.tier = (t.tier || 0) + 1;
-            t.upgradedThisShift = true;   // animator hint
-          } else {
-            t.upgradedThisShift = false;
-          }
-          _dbgRows.push({ type: t.type, from: t.pos, to: nextPos, corner: isCorner, upgradedFlag: t.upgradedThisShift, tier: t.tier || 0 });
-          t.pos = nextPos;
-          survived.push(t);
-        }
-      }
-      conveyor.length = 0;
-      conveyor.push(...survived);
-      if (_dbgRows.length) {
-        console.log('[AA SHIFT]', _dbgRows.map(r => `${r.type} ${r.from}→${r.to}${r.corner ? ` CORNER tier=${r.tier} flag=${r.upgradedFlag}` : ''}`).join(' | '));
-      }
-      return dropped;
-    }
-
-    const HOOKS_ALL_AROUND = {
-      ...MODE_HOOKS_DEFAULT,
-      // Topology overrides applied to top-level GAME / RING_SIZE / FINISH_POS
-      // at mode-init time below.
-      _modeGameDims:   ALL_AROUND_GAME,
-      _modeRingSize:   ALL_AROUND_RING_SIZE,
-      _modeFinishPos:  ALL_AROUND_FINISH_POS,
-      ringCellsForSlot(r, c)         { return ringCellsForSlot_AllAround(r, c); },
-      shiftConveyor(conveyor)        { return shiftConveyor_AllAround(conveyor); },
-      activateToken(token, ctx, sourceCellRC, sourceClusterCells) {
-        return activateToken_AllAround(token, ctx, sourceCellRC, sourceClusterCells);
-      },
-    };
-    const RULES_ALL_AROUND =
-`The Grid
-• 6×6 slot grid surrounded on all four sides by a conveyor — 24
-  collectible spots that wrap clockwise, plus three ×2 corner gates.
-
-Cluster Pays
-• 5 or more matching symbols touching horizontally or vertically pay.
-• Each cell in a cluster pays the value shown for that symbol on the
-  Paytable tab.
-• Wins clear, the grid refills from above, and cascades chain.
-
-The Conveyor
-• Tokens enter from the top-left and walk clockwise around the grid.
-• Tokens that reach the destroyer (also at the top-left) are lost.
-• Cluster cells on ANY edge (top row, right column, bottom row, or
-  left column) intercept the token next to them.
-• Each time a token passes a corner ×2 gate, it UPGRADES one tier.
-
-Token Tiers (each corner doubles the effect)
-• MULTIPLIER — base value × 2 per corner crossed.
-• WILD       — 2 wilds, then SUPER WILD (3), ULTRA WILD (4),
-                 MEGA WILD (6) at the third corner.
-• FREE SPINS — starts at 2, doubles per corner: 4 → 8 → 16.
-• TINY / MINI / MAJOR / GRAND — cash payout doubles per corner too.
-  Bet is still locked at spawn.
-
-Win = total cluster pays + token effects.`;
-
-    // ── Mode: Activator ──────────────────────────────────────────────────
-    // 7 columns × 6 rows. Conveyor is a 7-cell straight line on the top
-    // only. Cluster cells DO NOT activate tokens. Instead, a special
-    // "Activator" symbol drops into the grid; when an Activator lands in
-    // a column that has a token at the matching top-edge ring position,
-    // the token is activated. Token effects (multiplier / wild / etc.)
-    // are otherwise identical to Base mode.
-    const ACTIVATOR_GAME = { ROWS: 6, COLS: 7, MIN_CLUSTER: 5, MAX_CASCADES: 30 };
-    const ACTIVATOR_RING_SIZE  = 7;     // 7 conveyor cells, one per column
-    const ACTIVATOR_FINISH_POS = 8;
-    function ringCellsForSlot_Activator(_r, _c) {
-      // Clusters don't intercept tokens in Activator mode — Activator
-      // symbols do (see interceptViaActivators_Activator below).
-      return [];
-    }
-    function interceptViaActivators_Activator(grid, conveyor, ctx, cas, mode) {
-      const intercepts = [];
-      for (let c = 0; c < GAME.COLS; c++) {
-        // First Activator in this column (top-down) is the trigger.
-        let activatorR = -1;
-        for (let r = 0; r < GAME.ROWS; r++) {
-          if (grid[r][c] && grid[r][c].activator) { activatorR = r; break; }
-        }
-        if (activatorR < 0) continue;
-        const ringPos = c + 1;          // top edge: pos 1..COLS
-        const tokenIdx = conveyor.findIndex(t => t.pos === ringPos);
-        if (tokenIdx < 0) continue;
-        const token = conveyor[tokenIdx];
-        const sourceCell = { r: activatorR, c };
-        const fired = mode.activateToken(token, ctx, sourceCell, [sourceCell]);
-        intercepts.push({
-          cascade: cas, ringPos,
-          token: { ...token }, fired,
-          clusterCellRC: sourceCell,
-          viaActivator: true,
-        });
-        // Pop the activator cell + remove the token from conveyor.
-        grid[activatorR][c] = null;
-        if (_activatorsOnGrid > 0) _activatorsOnGrid--;
-        conveyor.splice(tokenIdx, 1);
-      }
-      return intercepts;
-    }
-    const HOOKS_ACTIVATOR = {
-      ...MODE_HOOKS_DEFAULT,
-      _modeGameDims:   ACTIVATOR_GAME,
-      _modeRingSize:   ACTIVATOR_RING_SIZE,
-      _modeFinishPos:  ACTIVATOR_FINISH_POS,
-      ringCellsForSlot(r, c) { return ringCellsForSlot_Activator(r, c); },
-      interceptViaActivators(grid, conveyor, ctx, cas) {
-        return interceptViaActivators_Activator(grid, conveyor, ctx, cas, this);
-      },
-    };
-
     // ── Mode: Rush Hour (puzzle) ────────────────────────────────────────
     // 5×5 grid wrapped by the same 4-sided conveyor as All Around. Cluster
     // pays are REPLACED by an arrow-driven puzzle: every symbol on the
@@ -1426,108 +1129,28 @@ Cascades
 
 Win = total paytable value × bet of every symbol that exited.`;
 
-    const RULES_ACTIVATOR =
-`The Grid
-• 7×6 slot grid (7 columns, 6 rows). Conveyor is a 7-cell straight
-  line above the top of the grid.
-
-Cluster Pays
-• 5 or more matching symbols touching horizontally or vertically pay.
-• Each cell in a cluster pays the value shown for that symbol on the
-  Paytable tab.
-• Wins clear, the grid refills from above, and cascades chain.
-
-The Activator
-• A rare ACTIVATOR symbol drops into the grid. When it lands in a
-  column with a token at the conveyor slot above, the token activates
-  and the Activator pops.
-• MULTIPLIER tokens charge a center display through the spin and
-  multiply the total win at spin end.
-• WILD, FREE SPINS, and TINY / MINI / MAJOR / GRAND tokens behave
-  the same as Base.
-
-Win = total cluster pays + token effects (× any charged multiplier).`;
-
-    // Read persisted mode at load.
-    const MODE_KEY = 'rush_hour_mode';
-    let MODE = 'rush';
-    try {
-      const saved = localStorage.getItem(MODE_KEY);
-      if (saved === 'base' || saved === 'allAround' || saved === 'activator' || saved === 'rush') MODE = saved;
-    } catch (_) {}
+    // Single mode for now — kept as a one-entry MODE_DEF so existing
+    // code that reaches for getModeDef() still works.
+    const MODE = 'rush';
 
     const MODE_DEF = {
-      base: {
-        ...HOOKS_BASE,
-        key: 'base',
-        name: 'Base Gameplay',
-        displayOrder: 1,
-        description: [
-          '7×7 grid wrapped by an L-shaped conveyor on the top + right',
-          'edges. 14 collectible spots plus a finish.',
-          '',
-          'Tokens carry MULTIPLIER, WILD, FREE SPINS, or one of four',
-          'cash jackpots. Edge cluster cells intercept the tokens next',
-          'to them.',
-        ],
-        getRulesText: () => RULES_BASE,
-      },
-      allAround: {
-        ...HOOKS_ALL_AROUND,
-        key: 'allAround',
-        name: 'All Around',
-        displayOrder: 2,
-        description: [
-          '6×6 grid wrapped by a conveyor on ALL FOUR sides — 24',
-          'collectible spots, plus three ×2 corner gates.',
-          '',
-          'Each corner UPGRADES the token: WILD doubles its scatter',
-          'count, MULTIPLIER doubles its value, FREE SPINS doubles',
-          'the awarded count. Tokens that survive three corners',
-          'become MEGA tier.',
-        ],
-        getRulesText: () => RULES_ALL_AROUND,
-      },
-      activator: {
-        ...HOOKS_ACTIVATOR,
-        key: 'activator',
-        name: 'Activator',
-        displayOrder: 3,
-        description: [
-          '7×6 grid. Conveyor is a 7-cell straight line on top.',
-          '',
-          'A rare ACTIVATOR symbol drops into the grid. When it',
-          'lands in a column with a token at the conveyor slot',
-          'above, the token activates and the Activator pops.',
-          '',
-          'Multipliers charge through the spin and multiply the',
-          'total win at spin end.',
-        ],
-        getRulesText: () => RULES_ACTIVATOR,
-      },
       rush: {
         ...HOOKS_RUSH,
         key: 'rush',
         name: 'Rush Hour',
-        displayOrder: 4,
+        displayOrder: 1,
         description: [
-          '5×5 grid wrapped by the same 4-sided conveyor as All',
-          'Around. Cluster pays are replaced by an arrow-driven',
-          'puzzle.',
+          '5×5 grid wrapped by a 4-sided conveyor.',
           '',
-          'Every symbol carries a cardinal arrow. Symbols move one',
-          'at a time toward their arrow; a symbol that walks off',
-          'the edge EXITS and pays its paytable value × bet.',
+          'Every car carries a cardinal arrow. Cars move one at a',
+          'time toward their arrow; a car that walks off the edge',
+          'EXITS the grid. Right-edge exits pay paytable value × bet.',
         ],
         getRulesText: () => RULES_RUSH,
       },
     };
-    function getModeDef() { return MODE_DEF[MODE] || MODE_DEF.base; }
-    function setMode(m) {
-      if (!MODE_DEF[m]) return;
-      MODE = m;
-      try { localStorage.setItem(MODE_KEY, m); } catch (_) {}
-    }
+    function getModeDef() { return MODE_DEF[MODE]; }
+    function setMode(_) { /* single-mode build — switching disabled */ }
 
     // Apply mode-specific topology to top-level GAME / RING_SIZE /
     // FINISH_POS. Engine code reads from these top-level values, so this
