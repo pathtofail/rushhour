@@ -160,12 +160,24 @@
     // varies slightly — corners ~93.3%, middles ~96.6% — because flat
     // displays don't perfectly cancel against the non-uniform exit
     // frequencies. Accepted trade-off for clean 4× / 5× display.
-    const RUSH_ARROW_ODDS = {
+    // Base mode displays: corner arrows 4×, middle arrows 5×.
+    const RUSH_ARROW_ODDS_BASE = {
        1: 4,   2: 5,   3: 5,   4: 4,
        5: 4,   6: 5,   7: 5,   8: 4,
        9: 4,  10: 5,  11: 5,  12: 4,
       13: 4,  14: 5,  15: 5,  16: 4,
     };
+    // Officer mode displays: corner arrows 3×, middle arrows 4×.
+    // The drop leaves headroom for the officer multiplier bonus while
+    // keeping system RTP near 95%.
+    const RUSH_ARROW_ODDS_OFFICER = {
+       1: 3,   2: 4,   3: 4,   4: 3,
+       5: 3,   6: 4,   7: 4,   8: 3,
+       9: 3,  10: 4,  11: 4,  12: 3,
+      13: 3,  14: 4,  15: 4,  16: 3,
+    };
+    // Re-pointed to the active mode's table at module init time, below.
+    let RUSH_ARROW_ODDS = RUSH_ARROW_ODDS_BASE;
     const RUSH_DEFAULT_ARROW_ODDS = 2.0;
     function arrowOddsFor(pos) {
       return RUSH_ARROW_ODDS[pos] ?? RUSH_DEFAULT_ARROW_ODDS;
@@ -184,9 +196,14 @@
     // The arrow's payout for that round is multiplied by the boost
     // (a stake on a 2.2× arrow with a ×10 boost pays 22× the stake
     // per car that exits there).
-    const OFFICER_MULT_VALUES  = [2, 4, 10, 25, 50, 100, 500, 1000];
-    const OFFICER_MULT_WEIGHTS = [50, 25, 12,  6,  3,  1.5, 0.3, 0.1];
-    const OFFICER_FIRE_CHANCE  = 0.35;   // per officer per round
+    // Officer-mode multiplier ladder. 500× and 1000× tiers removed
+    // (so rare they distort the average without players seeing them).
+    // Re-weighted so the average lands around 6.4× per fire — that
+    // lets E[boost per exit] ≈ 1.29 against arrow odds 3× / 4× and
+    // car payMult avg 0.445, hitting ~95% system RTP.
+    const OFFICER_MULT_VALUES  = [2, 4, 10, 25, 50, 100];
+    const OFFICER_MULT_WEIGHTS = [55, 30, 12, 5, 2, 1];
+    const OFFICER_FIRE_CHANCE  = 0.20;   // per officer per round (down from 0.35)
     function rollOfficerMultiplier() {
       let total = 0;
       for (const w of OFFICER_MULT_WEIGHTS) total += w;
@@ -251,103 +268,261 @@
         x: L.frameX + (L.cellSize + L.cellGap) * visC + L.cellSize / 2,
         y: L.frameY + (L.cellSize + L.cellGap) * visR + L.cellSize / 2,
       });
-      const makeOfficerSprite = () => {
+      // Build a police vehicle scene — top-down view, drawn with the
+      // car FRONT pointing up (-Y) by default. The whole assembly is
+      // rotated per corner so the car parks diagonally toward the
+      // grid centre. Door is closed (no protrusion). Officer stands
+      // a couple steps from the driver side, redrawn for a clearer
+      // top-down anatomy (cap with peak + shoulders + arms at sides).
+      const makeOfficerCarScene = () => {
         const cont = new PIXI.Container();
         const s = L.cellSize / 90;
-        const body = new PIXI.Graphics();
-        body.lineStyle(1.5 * s, 0x000000, 0.9);
-        body.beginFill(0x14213D, 1);
-        body.drawRoundedRect(-18 * s, 8 * s, 36 * s, 24 * s, 4 * s);
-        body.endFill();
-        cont.addChild(body);
-        const btnLine = new PIXI.Graphics();
-        btnLine.beginFill(0xFFD23F, 1);
-        btnLine.drawRect(-1.5 * s, 10 * s, 3 * s, 14 * s);
-        btnLine.endFill();
-        btnLine.drawCircle(0, 13 * s, 1.6 * s);
-        btnLine.drawCircle(0, 21 * s, 1.6 * s);
-        cont.addChild(btnLine);
-        const eps = new PIXI.Graphics();
-        eps.beginFill(0xFFD23F, 0.95);
-        eps.drawRoundedRect(-19 * s, 8 * s, 5 * s, 4 * s, 1 * s);
-        eps.drawRoundedRect( 14 * s, 8 * s, 5 * s, 4 * s, 1 * s);
-        eps.endFill();
-        cont.addChild(eps);
-        const face = new PIXI.Graphics();
-        face.lineStyle(1 * s, 0x6E4A2A, 0.7);
-        face.beginFill(0xF2C29A, 1);
-        face.drawRoundedRect(-13 * s, -14 * s, 26 * s, 22 * s, 7 * s);
-        face.endFill();
-        cont.addChild(face);
-        const shades = new PIXI.Graphics();
-        shades.beginFill(0x000000, 1);
-        shades.drawRoundedRect(-13 * s, -7 * s, 26 * s, 6 * s, 2 * s);
-        shades.endFill();
-        shades.beginFill(0x1A1A1A, 1);
-        shades.drawRect(-1 * s, -6 * s, 2 * s, 4 * s);
-        shades.endFill();
-        shades.beginFill(0xFFFFFF, 0.35);
-        shades.drawCircle(-7 * s, -4.5 * s, 1.5 * s);
-        shades.drawCircle( 7 * s, -4.5 * s, 1.5 * s);
-        shades.endFill();
-        cont.addChild(shades);
-        const stash = new PIXI.Graphics();
-        stash.lineStyle(1 * s, 0x1A0F08, 1);
-        stash.beginFill(0x3A2818, 1);
-        stash.moveTo(-9 * s, 1 * s);
-        stash.lineTo(-1 * s, 0 * s);
-        stash.lineTo(-1 * s, 3 * s);
-        stash.lineTo(-9 * s, 4 * s);
-        stash.lineTo(-9 * s, 1 * s);
-        stash.moveTo( 9 * s, 1 * s);
-        stash.lineTo( 1 * s, 0 * s);
-        stash.lineTo( 1 * s, 3 * s);
-        stash.lineTo( 9 * s, 4 * s);
-        stash.lineTo( 9 * s, 1 * s);
-        stash.endFill();
-        cont.addChild(stash);
-        const visor = new PIXI.Graphics();
-        visor.lineStyle(1 * s, 0x000000, 1);
-        visor.beginFill(0x0A0A14, 1);
-        visor.drawRoundedRect(-17 * s, -17 * s, 34 * s, 5 * s, 2 * s);
-        visor.endFill();
-        cont.addChild(visor);
+
+        // ── VEHICLE BODY ── (~20% larger than before)
+        const car = new PIXI.Graphics();
+        // Underbody shadow
+        car.beginFill(0x000000, 0.25);
+        car.drawRoundedRect(-19 * s, -27 * s, 38 * s, 60 * s, 6 * s);
+        car.endFill();
+        // Main body — dark navy
+        car.lineStyle(1.4 * s, 0x000000, 1);
+        car.beginFill(0x14213D, 1);
+        car.drawRoundedRect(-18 * s, -30 * s, 36 * s, 60 * s, 5 * s);
+        car.endFill();
+        // White side panel — runs across the middle (US police livery)
+        car.lineStyle(0);
+        car.beginFill(0xE8DDC4, 0.92);
+        car.drawRect(-18 * s, -7 * s, 36 * s, 14 * s);
+        car.endFill();
+        // Door seams — thin lines on the white panel suggesting closed
+        // driver / passenger doors (no protrusion).
+        car.lineStyle(0.6 * s, 0x14213D, 0.6);
+        car.moveTo(-18 * s, -7 * s); car.lineTo(-18 * s,  7 * s);  // left edge already present
+        car.moveTo( 18 * s, -7 * s); car.lineTo( 18 * s,  7 * s);
+        // Vertical seams to suggest door panel boundaries
+        car.moveTo(-18 * s,  0 * s); car.lineTo(-15 * s,  0 * s);
+        car.moveTo( 15 * s,  0 * s); car.lineTo( 18 * s,  0 * s);
+        // Windshield (front)
+        car.lineStyle(0);
+        car.beginFill(0x0F1726, 0.78);
+        car.drawRoundedRect(-14 * s, -27 * s, 28 * s, 10 * s, 2.5 * s);
+        car.endFill();
+        // Rear window
+        car.beginFill(0x0F1726, 0.55);
+        car.drawRoundedRect(-14 * s, 16 * s, 28 * s, 10 * s, 2.5 * s);
+        car.endFill();
+        // Side mirrors — small bumps
+        car.lineStyle(0.5 * s, 0x000000, 0.9);
+        car.beginFill(0x14213D, 1);
+        car.drawRoundedRect(-21 * s, -22 * s, 3 * s, 4 * s, 0.7 * s);
+        car.drawRoundedRect( 18 * s, -22 * s, 3 * s, 4 * s, 0.7 * s);
+        car.endFill();
+        // Wheels — 4 corners as small rounded rects
+        car.beginFill(0x0E1218, 1);
+        car.lineStyle(0.5 * s, 0x000000, 0.7);
+        car.drawRoundedRect(-21 * s, -17 * s, 4 * s, 8 * s, 1 * s);
+        car.drawRoundedRect( 17 * s, -17 * s, 4 * s, 8 * s, 1 * s);
+        car.drawRoundedRect(-21 * s,   9 * s, 4 * s, 8 * s, 1 * s);
+        car.drawRoundedRect( 17 * s,   9 * s, 4 * s, 8 * s, 1 * s);
+        car.endFill();
+        cont.addChild(car);
+        // POLICE wordmark on the white panel
+        const wordmark = new PIXI.Text('POLICE', {
+          fontFamily: FONT, fontSize: 5 * s, fill: 0x14213D,
+          fontWeight: '900', letterSpacing: 0.6,
+        });
+        wordmark.anchor.set(0.5);
+        wordmark.x = 0;
+        wordmark.y = 0;
+        cont.addChild(wordmark);
+
+        // ── LIGHT BAR ── (housing + red + blue lights, scaled up)
+        const lightBar = new PIXI.Graphics();
+        lightBar.lineStyle(0.5 * s, 0x000000, 0.95);
+        lightBar.beginFill(0x111418, 1);
+        lightBar.drawRoundedRect(-13 * s, -16 * s, 26 * s, 6 * s, 1 * s);
+        lightBar.endFill();
+        cont.addChild(lightBar);
+        const redLight = new PIXI.Graphics();
+        redLight.beginFill(0xE63946, 1);
+        redLight.drawCircle(-6.5 * s, -13 * s, 3 * s);
+        redLight.endFill();
+        redLight.beginFill(0xE63946, 0.35);
+        redLight.drawCircle(-6.5 * s, -13 * s, 5 * s);
+        redLight.endFill();
+        cont.addChild(redLight);
+        const blueLight = new PIXI.Graphics();
+        blueLight.beginFill(0x3897F0, 1);
+        blueLight.drawCircle(6.5 * s, -13 * s, 3 * s);
+        blueLight.endFill();
+        blueLight.beginFill(0x3897F0, 0.35);
+        blueLight.drawCircle(6.5 * s, -13 * s, 5 * s);
+        blueLight.endFill();
+        cont.addChild(blueLight);
+        // Pulsing — red and blue alternate (180° out of phase).
+        gsap.to(redLight,  { alpha: 0.30, duration: 0.45, yoyo: true, repeat: -1, ease: 'sine.inOut' });
+        gsap.to(blueLight, { alpha: 0.30, duration: 0.45, yoyo: true, repeat: -1, ease: 'sine.inOut', delay: 0.225 });
+
+        // ── OFFICER (top-down) ──
+        // True top-down view: a person seen from straight above. From
+        // this angle you see the cap (head with the peak/visor) and
+        // the shoulders curving wider beneath, plus the rounded bumps
+        // of arms hanging at the sides. Cap is in front (toward where
+        // the officer's facing — by default, away from car body).
+        const offX = -42 * s;   // left of car, "out of the door"
+        const offY = 0;
+        const officer = new PIXI.Container();
+        officer.x = offX;
+        officer.y = offY;
+
+        // Shoulders — wider oval body part. Wider on the side-to-side
+        // axis (perpendicular to facing direction) so it reads as
+        // shoulders rather than a torso block.
+        const shoulders = new PIXI.Graphics();
+        shoulders.lineStyle(0.6 * s, 0x000000, 0.95);
+        shoulders.beginFill(0x14213D, 1);
+        shoulders.drawEllipse(0, 1 * s, 6.5 * s, 4.8 * s);
+        shoulders.endFill();
+        // Belt strap horizontally across the middle
+        shoulders.lineStyle(0);
+        shoulders.beginFill(0x0A0A14, 1);
+        shoulders.drawRect(-6 * s, 0.2 * s, 12 * s, 1.4 * s);
+        shoulders.endFill();
+        // Belt buckle — small gold square
+        shoulders.beginFill(0xFFD23F, 0.95);
+        shoulders.drawRect(-0.7 * s, 0 * s, 1.4 * s, 1.8 * s);
+        shoulders.endFill();
+        officer.addChild(shoulders);
+
+        // Arms hanging at sides — small dark bumps with skin-tone hands
+        const arms = new PIXI.Graphics();
+        arms.lineStyle(0.5 * s, 0x000000, 0.9);
+        arms.beginFill(0x14213D, 1);
+        arms.drawCircle(-7 * s, 2.5 * s, 1.7 * s);
+        arms.drawCircle( 7 * s, 2.5 * s, 1.7 * s);
+        arms.endFill();
+        // Hands — small skin-tone circles at the ends
+        arms.lineStyle(0);
+        arms.beginFill(0xF2C29A, 1);
+        arms.drawCircle(-7 * s, 4 * s, 1.1 * s);
+        arms.drawCircle( 7 * s, 4 * s, 1.1 * s);
+        arms.endFill();
+        officer.addChild(arms);
+
+        // Cap — head from above, sitting on top of the shoulders.
+        // Slightly forward (toward -Y, the facing direction) so the
+        // cap-with-visor silhouette is unmistakable.
         const cap = new PIXI.Graphics();
-        cap.lineStyle(1.5 * s, 0x000000, 0.9);
+        cap.lineStyle(0.6 * s, 0x000000, 1);
         cap.beginFill(0x14213D, 1);
-        cap.moveTo(-13 * s, -30 * s);
-        cap.lineTo( 13 * s, -30 * s);
-        cap.lineTo( 15 * s, -17 * s);
-        cap.lineTo(-15 * s, -17 * s);
-        cap.lineTo(-13 * s, -30 * s);
+        cap.drawCircle(0, -3 * s, 2.8 * s);
         cap.endFill();
-        cont.addChild(cap);
-        const badge = new PIXI.Graphics();
-        badge.lineStyle(0.7 * s, 0x4A3208, 1);
-        badge.beginFill(0xFFD23F, 1);
-        const spikes = 5;
-        const rOut = 4 * s, rIn = 1.6 * s;
-        const cy = -23 * s;
-        for (let i = 0; i < spikes * 2; i++) {
-          const r = i % 2 === 0 ? rOut : rIn;
-          const a = (i / (spikes * 2)) * Math.PI * 2 - Math.PI / 2;
-          const px = Math.cos(a) * r;
-          const py = Math.sin(a) * r + cy;
-          if (i === 0) badge.moveTo(px, py); else badge.lineTo(px, py);
-        }
-        badge.lineTo(Math.cos(-Math.PI / 2) * rOut, Math.sin(-Math.PI / 2) * rOut + cy);
-        badge.endFill();
-        cont.addChild(badge);
-        return cont;
+        // Visor (peak) — protrudes forward from the cap, darker tone.
+        // Shaped like a small trapezoid so it reads as a brim.
+        cap.lineStyle(0);
+        cap.beginFill(0x000000, 1);
+        cap.drawPolygon([
+          -1.6 * s, -5.4 * s,
+           1.6 * s, -5.4 * s,
+           1.1 * s, -6.6 * s,
+          -1.1 * s, -6.6 * s,
+        ]);
+        cap.endFill();
+        // Cap badge — tiny gold dot
+        cap.beginFill(0xFFD23F, 1);
+        cap.drawCircle(0, -3.4 * s, 0.8 * s);
+        cap.endFill();
+        officer.addChild(cap);
+
+        cont.addChild(officer);
+
+        // ── Officer patrol ──
+        // The officer paces randomly between waypoints around the car
+        // perimeter (in cont's local frame). Each step: turn to face
+        // the destination, walk there with a sine-eased tween, pause
+        // briefly, repeat. The whole loop runs forever via gsap
+        // delayedCall so it survives across rounds.
+        const _waypoints = [
+          { x: -45 * s, y: -16 * s },   // L-front
+          { x: -45 * s, y:  16 * s },   // L-back
+          { x: -30 * s, y:  40 * s },   // BL
+          { x:   0 * s, y:  42 * s },   // B-centre
+          { x:  30 * s, y:  40 * s },   // BR
+          { x:  45 * s, y:  16 * s },   // R-back
+          { x:  45 * s, y: -16 * s },   // R-front
+          { x:  30 * s, y: -42 * s },   // FR
+          { x:   0 * s, y: -45 * s },   // F-centre
+          { x: -30 * s, y: -42 * s },   // FL
+        ];
+        // The 10 waypoints form a closed loop around the car perimeter.
+        // Walking from index i → i±1 traces the perimeter; jumping to
+        // a random index can cut diagonally across the car body. So
+        // patrol moves to a neighbour only — usually ±1, occasionally
+        // ±2 for a slightly longer step. Direction also flips at random
+        // so the officer doesn't endlessly orbit one way.
+        let _wpIdx = 0;       // start near the L-front waypoint (matches offX,offY ≈ (-42, 0))
+        let _wpDir = 1;
+        const walkToRandom = () => {
+          // Reverse direction occasionally so motion looks human.
+          if (Math.random() < 0.18) _wpDir = -_wpDir;
+          // Step size of 1 most of the time; 2 sometimes for variety.
+          const step = (Math.random() < 0.25 ? 2 : 1) * _wpDir;
+          _wpIdx = (_wpIdx + step + _waypoints.length) % _waypoints.length;
+          const target = _waypoints[_wpIdx];
+          const dx = target.x - officer.x;
+          const dy = target.y - officer.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < 1) {
+            gsap.delayedCall(0.4, walkToRandom);
+            return;
+          }
+          // Face the direction of travel — atan2(dx, -dy) maps the
+          // local "forward" (-Y) onto the (dx, dy) direction so the
+          // visor points where the officer is heading.
+          officer.rotation = Math.atan2(dx, -dy);
+          // ~28 units / second walk speed → 1–2.5s per step.
+          const dur = Math.max(0.9, dist / (28 * s));
+          gsap.to(officer, {
+            x: target.x, y: target.y,
+            duration: dur, ease: 'sine.inOut',
+            onComplete: () => {
+              gsap.delayedCall(0.5 + Math.random() * 1.4, walkToRandom);
+            },
+          });
+        };
+        // Stagger the four officers so they don't move in lockstep.
+        gsap.delayedCall(0.4 + Math.random() * 1.6, walkToRandom);
+
+        return { cont, officerLocal: { x: offX, y: offY }, officer };
       };
+
+      // Diagonal rotation per corner so each car points its FRONT
+      // toward the grid centre. (Default car orientation has the
+      // front at -Y; rotation is measured clockwise.)
+      const cornerRotations = [
+        3 * Math.PI / 4,    // 0 = TL → front toward SE (grid centre)
+       -3 * Math.PI / 4,    // 1 = TR → front toward SW
+       -1 * Math.PI / 4,    // 2 = BR → front toward NW
+        1 * Math.PI / 4,    // 3 = BL → front toward NE
+      ];
+
       scene.officers = [];
       for (const oc of officerCornerVis) {
         const ctr = visToXY(oc.visR, oc.visC);
-        const sprite = makeOfficerSprite();
+        const { cont: sprite, officerLocal, officer: officerFigure } = makeOfficerCarScene();
         sprite.x = ctr.x;
         sprite.y = ctr.y;
+        sprite.rotation = cornerRotations[oc.corner];
         sprite._cornerIdx = oc.corner;
-        sprite._cornerCenter = { x: ctr.x, y: ctr.y };
+        // Initial _cornerCenter (fallback). The officer patrols, so
+        // the spin animator queries officerFigure's CURRENT world
+        // position at throw time via toGlobal — see _playOfficerBoosts.
+        const rot = sprite.rotation;
+        const cosR = Math.cos(rot), sinR = Math.sin(rot);
+        const wx = ctr.x + officerLocal.x * cosR - officerLocal.y * sinR;
+        const wy = ctr.y + officerLocal.x * sinR + officerLocal.y * cosR;
+        sprite._cornerCenter = { x: wx, y: wy };
+        sprite._officerFigure = officerFigure;
         frame.addChild(sprite);
         scene.officers.push(sprite);
       }
@@ -688,7 +863,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
 Place your bets
 • 16 arrows surround the grid. Tap any arrow to drop a
   chip on it. You can bet on as many arrows as you want.
-• Corner arrows pay 4×, middle arrows pay 5×.
+• Corner arrows pay 3×, middle arrows pay 4×.
 
 What happens when you press PLAY
 • Cars move one at a time in the direction of their arrow.
@@ -703,7 +878,7 @@ Cars
 The traffic officers
 • Four officers stand at the outer corners. Some rounds
   one or more will drop a bonus multiplier (2× through
-  1000×) onto a random arrow before any car moves.
+  100×) onto a random arrow before any car moves.
 • Boosted arrows show a brighter number. The bonus only
   lasts for that round.
 
@@ -718,12 +893,12 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
     // Read persisted mode at load. Page reloads on switch (same
     // pattern as TrailCatcher) so closure-scoped constants get
     // re-evaluated against the new mode without partial-state risk.
+    // Only the officer mode is currently exposed in the UI; the base
+    // hooks are kept in MODE_DEF for code preservation but the
+    // mode-switcher buttons have been removed so the mode is locked
+    // to 'officer'. (Switch by editing this default if needed.)
     const MODE_KEY = 'rush_hour_mode';
-    let MODE = 'base';
-    try {
-      const saved = localStorage.getItem(MODE_KEY);
-      if (saved === 'base' || saved === 'officer') MODE = saved;
-    } catch (_) {}
+    let MODE = 'officer';
 
     const MODE_DEF = {
       base: {
@@ -778,6 +953,12 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       if (def?._modeGameDims)  Object.assign(GAME, def._modeGameDims);
       if (def?._modeRingSize)  RING_SIZE  = def._modeRingSize;
       if (def?._modeFinishPos) FINISH_POS = def._modeFinishPos;
+      // Pick the displayed arrow-odds table per mode. Officer mode
+      // shows 3× / 4× to leave room for the multiplier bonus; Base
+      // mode shows 4× / 5×.
+      RUSH_ARROW_ODDS = (MODE === 'officer')
+        ? RUSH_ARROW_ODDS_OFFICER
+        : RUSH_ARROW_ODDS_BASE;
     })();
 
     // ── Stats / RTP tracker ──────────────────────────────────────────────────
@@ -1257,14 +1438,17 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       //   (grid)
       //   bottomPanelH  chips + total + CLEAR + REPEAT + PLAY
       //   bottomPad
-      // Top band fits: mode-button caption + button row (top half) +
-      // BALANCE pill (bottom half). 90px gives each layer ~45px.
-      const topBarH      = 90;
+      // Mode buttons removed; BALANCE moved to the bottom panel.
+      // Top band is now just a small safe-area reserve.
+      const topBarH      = 16;
       // winBandH must fit: WIN headline (~48px) + inner gap (~6px) +
       // status text (~14px) + HUD breathing room (~24px) = ~92px.
-      // 100 leaves a small slack for descenders / line-height padding.
       const winBandH     = 100;
-      const bottomPanelH = 96;
+      // Bottom panel — single primary row. The chip column has its
+      // own internal stack: BALANCE pill on top, chips below; the
+      // other elements (info, clear/repeat, TOTAL BET, PLAY) span
+      // the full panel height beside it.
+      const bottomPanelH = 130;
       const bottomPad    = 14;
       const horizK = FRAME_W_CELLS + (FRAME_W_CELLS - 1) * GAP_RATIO;
       const vertK  = FRAME_H_CELLS + (FRAME_H_CELLS - 1) * GAP_RATIO;
@@ -2341,9 +2525,13 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         vt.y = atY - 2 * scale;
         paytableContent.addChild(vt);
       };
-      oddsRow('Corner-adjacent arrows', '4×', cy);
+      // Pull the actual displayed odds from the active mode's table
+      // so the paytable matches what's painted on the cells.
+      const _cornerArrowVal = arrowOddsFor(1);   // pos 1 is a corner
+      const _middleArrowVal = arrowOddsFor(2);   // pos 2 is a middle
+      oddsRow('Corner-adjacent arrows', `${_cornerArrowVal}×`, cy);
       cy += 22 * scale;
-      oddsRow('Middle-of-edge arrows', '5×', cy);
+      oddsRow('Middle-of-edge arrows', `${_middleArrowVal}×`, cy);
       cy += 32 * scale;
 
       // ── Officer multipliers — only shown in modes that use officers.
@@ -2414,8 +2602,8 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         // Cash amount won per exit at the current chip value.
         // Show both corner-arrow win and middle-arrow win.
         const mult = colDef.payMult || 1;
-        const cornerWin = currentBet * 4 * mult;
-        const middleWin = currentBet * 5 * mult;
+        const cornerWin = currentBet * _cornerArrowVal * mult;
+        const middleWin = currentBet * _middleArrowVal * mult;
         const cashLine1 = new PIXI.Text(fmtCash(middleWin), {
           fontFamily: FONT, fontSize: 14 * scale,
           fill: 0xFFD23F, fontWeight: '800',
@@ -3593,52 +3781,11 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         cont.labelText = lbl;
         return cont;
       };
-      const topPillW   = 180;
-      // Position the BALANCE pill in the BOTTOM half of the topBar so
-      // it sits next to / below the mode-button row that takes the
-      // top half of the bar.
-      scene.balancePill = makeTopBarPill('BALANCE', fmtCash(player.balance), 0xC9A24A);
-      scene.balancePill.x = L.sw - 24 - topPillW / 2;
-      scene.balancePill.y = TOP_BAR_H - 24;
-      scene.stage.addChild(scene.balancePill);
-
-      // ── Mode-button row + caption ──
-      // Centred at the top of the canvas. Generated from MODE_DEF
-      // sorted by displayOrder so adding a 3rd / 4th variant
-      // (Ante / Super-Ante) just registers another MODE_DEF entry.
-      const modeList = Object.values(MODE_DEF)
-        .slice()
-        .sort((a, b) => (a.displayOrder ?? 999) - (b.displayOrder ?? 999));
-      const modeBtnW = 150 * gs;
-      const modeBtnH = 28 * gs;
-      const modeGap  = 10 * gs;
-      const modeRowW = modeList.length * modeBtnW + (modeList.length - 1) * modeGap;
-      const modeRowLeftCX = (L.sw - modeRowW) / 2 + modeBtnW / 2;
-      const modeCaptionY = 8 * gs;
-      const modeRowY = modeCaptionY + 16 * gs + modeBtnH / 2;
-      const modeCaption = new PIXI.Text('GAME MODE', {
-        fontFamily: FONT, fontSize: 10 * gs, fill: 0xFFD23F,
-        letterSpacing: 2.4, fontWeight: '700',
-      });
-      modeCaption.anchor.set(0.5, 0);
-      modeCaption.x = L.sw / 2;
-      modeCaption.y = modeCaptionY;
-      modeCaption.alpha = 0.85;
-      scene.stage.addChild(modeCaption);
-      modeList.forEach((m, i) => {
-        const btn = makeModeButton({
-          x: modeRowLeftCX + i * (modeBtnW + modeGap),
-          y: modeRowY,
-          w: modeBtnW, h: modeBtnH,
-          label: m.name,
-          isActive: m.key === MODE,
-          onTap: () => {
-            if (scene.spinBtn && scene.spinBtn.busy) return;
-            openModeConfirmModal(m.key);
-          },
-        });
-        scene.stage.addChild(btn);
-      });
+      // BALANCE pill is now created inside the bottom panel (top row),
+      // so the top bar stays empty. Mode buttons are also disabled —
+      // Officer mode is the only allowed mode and is set as default.
+      // The makeTopBarPill helper + makeModeButton + openModeConfirmModal
+      // helpers are kept intentionally for future re-introduction.
 
       // ── BIG WIN headline + status subtitle (above the grid) ────
       // The WIN amount is the dominant visual on the screen — Aviator-
@@ -3658,8 +3805,20 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       });
       scene.statusText.anchor.set(0.5, 1);
       scene.statusText.x = winCenterX;
-      scene.statusText.y = L.frameY - HUD_BREATH;
+      // Bumped up a hair to leave room for a subtitle in the gap
+      // between status and the grid.
+      scene.statusText.y = L.frameY - HUD_BREATH - 14;
       scene.stage.addChild(scene.statusText);
+      // Subtitle — small helper line under PLACE YOUR BETS, only
+      // visible while the player is in the bet phase.
+      scene.statusSubtext = new PIXI.Text('You can place multiple bets', {
+        fontFamily: FONT, fontSize: 11,
+        fill: 0xA8AEB6, fontWeight: '500', letterSpacing: 1.2,
+      });
+      scene.statusSubtext.anchor.set(0.5, 1);
+      scene.statusSubtext.x = winCenterX;
+      scene.statusSubtext.y = L.frameY - HUD_BREATH;
+      scene.stage.addChild(scene.statusSubtext);
       // WIN amount — anchor bottom-centre, bottom edge sits STATUS_GAP
       // above the status text. Stacks above status, block hugs grid.
       // Format includes a "WIN " prefix so the meaning of the number
@@ -3683,19 +3842,21 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       };
 
       // ── Bottom panel ───────────────────────────────────────────
-      // Layout (left → right):
-      //   [info]  [chips]  ┌── Clear Bets ──┐  [TOTAL BET]  [  PLAY  ]
-      //                    └── Repeat Bet ──┘
-      // Clear / Repeat are stacked vertically into one column to the
-      // left of TOTAL BET. PLAY is taller and sits on the far right.
+      // Single-row cluster:
+      //   [info]  [BALANCE pill]  ┌── Clear ──┐  [TOTAL BET]  [PLAY]
+      //           [   chips    ]  └── Repeat ─┘
+      // The BALANCE-pill + chips share a single column slot to the
+      // right of info and to the left of the Clear/Repeat stack. Pill
+      // is on top, chips below; both share the chip-cluster width.
       const panelTop    = L.frameY + L.frameH + HUD_BREATH;
       const panelBottom = panelTop + L.bottomPanelH;
       const panelCY     = (panelTop + panelBottom) / 2;
 
-      // Chip selector — 4 circular pills.
-      const chipR   = 24;
-      const chipGap = 12;
-      const chipsW  = CHIP_VALUES.length * chipR * 2 + (CHIP_VALUES.length - 1) * chipGap;
+      // Chip selector — 4 small rectangular chips.
+      const chipW   = 44;
+      const chipH   = 28;
+      const chipGap = 10;
+      const chipsW  = CHIP_VALUES.length * chipW + (CHIP_VALUES.length - 1) * chipGap;
       const totalBoxW = 150;
       const totalBoxH = 56;
       // Stacked control column — Clear Bets (top) over Repeat Bet (bottom).
@@ -3707,30 +3868,75 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       const playW    = 180;
       const playH    = 60;
       const sectionGap = 26;
+
+      // BALANCE pill sits ABOVE the chips, same width as chips. Both
+      // are housed in a single "chip column" slot. Combined height
+      // (pill + gap + chips) is sized to match the PLAY button + the
+      // TOTAL BET box on the right side of the cluster (~60).
+      const balancePillH = 28;
+      const colInnerGap  = 4;
+      const colH         = balancePillH + colInnerGap + chipH;
+      const colTop       = panelCY - colH / 2;
+      const balancePillCY = colTop + balancePillH / 2;
+      const chipsRowCY    = colTop + balancePillH + colInnerGap + chipH / 2;
+
+      // Row total: chips column + ctrl stack + TOTAL BET box + PLAY.
       const rowW = chipsW + sectionGap + ctrlW + sectionGap + totalBoxW + sectionGap + playW;
       const rowLeft = (L.sw - rowW) / 2;
-      // Info button sits just left of the chips, anchored close to the
-      // bet-controls cluster so it reads as part of the bottom row, not
-      // an orphan in the corner.
+      // Info button sits just left of the chips column.
       scene.infoBtn.x = rowLeft - 18 - infoSize / 2;
       scene.infoBtn.y = panelCY;
 
-      // Chip selector
+      // ── BALANCE pill (top of chip column, same width as chips) ──
+      const makeBalancePill = (label, value, w, h) => {
+        const cont = new PIXI.Container();
+        const bg = new PIXI.Graphics();
+        bg.lineStyle(2, 0xFFD23F, 1);
+        bg.beginFill(0x2A3548, 1);
+        bg.drawRoundedRect(-w / 2, -h / 2, w, h, 10);
+        bg.endFill();
+        cont.addChild(bg);
+        const lbl = new PIXI.Text(label, {
+          fontFamily: FONT, fontSize: 9, fill: 0xFFD23F,
+          letterSpacing: 1.8, fontWeight: '700',
+        });
+        const val = new PIXI.Text(value, {
+          fontFamily: FONT, fontSize: 14, fill: 0xFFFFFF, fontWeight: '800',
+        });
+        // Same row: label hugs left edge, value hugs right edge —
+        // mirrors the TOTAL BET pill on the other side of the cluster.
+        const padX = 10;
+        lbl.anchor.set(0, 0.5);
+        val.anchor.set(1, 0.5);
+        lbl.x = -w / 2 + padX;
+        val.x =  w / 2 - padX;
+        cont.addChild(lbl);
+        cont.addChild(val);
+        cont.labelText = lbl;
+        cont.valText = val;
+        return cont;
+      };
+      scene.balancePill = makeBalancePill('BALANCE', fmtCash(player.balance), chipsW, balancePillH);
+      scene.balancePill.x = rowLeft + chipsW / 2;
+      scene.balancePill.y = balancePillCY;
+      scene.stage.addChild(scene.balancePill);
+
+      // Chip selector — small rectangular chips.
       const makeChipButton = (value) => {
         const cont = new PIXI.Container();
         cont._chipValue = value;
         const bg = new PIXI.Graphics();
         const txt = new PIXI.Text(`$${value}`, {
-          fontFamily: FONT, fontSize: 15, fill: 0xFFFFFF, fontWeight: '800',
+          fontFamily: FONT, fontSize: 13, fill: 0xFFFFFF, fontWeight: '800',
         });
         txt.anchor.set(0.5);
         cont._draw = (active) => {
           bg.clear();
-          // Inactive = cool dark slate disc, white $; active = saturated
-          // yellow disc, dark $ — saturation contrast pop selects state.
+          // Inactive = cool dark slate, white $; active = saturated
+          // yellow, dark $ — saturation contrast pop selects state.
           bg.lineStyle(active ? 3 : 2, active ? 0x1A2332 : 0xFFD23F, 1);
           bg.beginFill(active ? 0xFFD23F : 0x2A3548, 1);
-          bg.drawCircle(0, 0, chipR);
+          bg.drawRoundedRect(-chipW / 2, -chipH / 2, chipW, chipH, 10);
           bg.endFill();
           txt.style.fill = active ? 0x1A2332 : 0xFFFFFF;
         };
@@ -3739,21 +3945,22 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         cont.addChild(txt);
         cont.eventMode = 'static';
         cont.cursor = 'pointer';
-        cont.hitArea = new PIXI.Circle(0, 0, chipR);
+        cont.hitArea = new PIXI.Rectangle(-chipW / 2, -chipH / 2, chipW, chipH);
         cont.on('pointerover', () => gsap.to(cont.scale, { x: 1.08, y: 1.08, duration: 0.12 }));
         cont.on('pointerout',  () => gsap.to(cont.scale, { x: 1, y: 1, duration: 0.12 }));
         cont.on('pointertap',  () => setChipValue(value));
         return cont;
       };
+      // ── Chips row, sitting under the BALANCE pill ──────────────
       scene.chipBtns = [];
-      let chipX = rowLeft + chipR;
+      let chipX = rowLeft + chipW / 2;
       for (const v of CHIP_VALUES) {
         const c = makeChipButton(v);
         c.x = chipX;
-        c.y = panelCY;
+        c.y = chipsRowCY;
         scene.stage.addChild(c);
         scene.chipBtns.push(c);
-        chipX += chipR * 2 + chipGap;
+        chipX += chipW + chipGap;
       }
       const afterChipsX = rowLeft + chipsW + sectionGap;
 
@@ -3845,7 +4052,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         // when busy.
         playBg.lineStyle(2, 0x065F46, 1);
         playBg.beginFill(dim ? 0x065F46 : (hover ? 0x34D399 : 0x10B981), 1);
-        playBg.drawRoundedRect(-playW / 2, -playH / 2, playW, playH, 12);
+        playBg.drawRoundedRect(-playW / 2, -playH / 2, playW, playH, 10);
         playBg.endFill();
       };
       drawPlay();
@@ -3906,7 +4113,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         rbBg.clear();
         rbBg.lineStyle(2 * gs, 0x065F46, 1);
         rbBg.beginFill(hover ? 0x34D399 : 0x10B981, 1);
-        rbBg.drawRoundedRect(-rbW / 2, -rbH / 2, rbW, rbH, 14 * gs);
+        rbBg.drawRoundedRect(-rbW / 2, -rbH / 2, rbW, rbH, 10 * gs);
         rbBg.endFill();
       };
       drawRb();
@@ -3966,9 +4173,11 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         );
         // Dark slate fades to fully transparent. Stronger than yellow
         // for "popup" feel; doesn't compete with the yellow WIN amount.
-        _radial.addColorStop(0,    'rgba(8, 14, 26, 0.85)');
-        _radial.addColorStop(0.45, 'rgba(8, 14, 26, 0.55)');
-        _radial.addColorStop(0.80, 'rgba(8, 14, 26, 0.15)');
+        // Cranked darker so the popup reads as a real backdrop on the
+        // navy canvas, not just a faint vignette.
+        _radial.addColorStop(0,    'rgba(8, 14, 26, 0.98)');
+        _radial.addColorStop(0.45, 'rgba(8, 14, 26, 0.88)');
+        _radial.addColorStop(0.80, 'rgba(8, 14, 26, 0.45)');
         _radial.addColorStop(1,    'rgba(8, 14, 26, 0.00)');
         _glowCtx.fillStyle = _radial;
         _glowCtx.fillRect(0, 0, winPopupGlowSize, winPopupGlowSize);
@@ -3981,7 +4190,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         const steps = 12;
         for (let i = 0; i < steps; i++) {
           const t = i / steps;
-          const a = 0.78 * Math.max(0, 1 - t * t);
+          const a = 0.95 * Math.max(0, 1 - t * t);
           g.beginFill(0x080E1A, a);
           g.drawCircle(0, 0, (winPopupGlowSize / 2) * (1 - t));
           g.endFill();
@@ -4025,7 +4234,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       } else {
         scene.stage.addChild(winPopup);
       }
-      scene.winPopup = { container: winPopup, amtText: winPopupAmt };
+      scene.winPopup = { container: winPopup, amtText: winPopupAmt, lblText: winPopupLbl };
 
       // ── Click-trap for the popup ──
       // Fullscreen invisible rectangle that sits BETWEEN the popup
@@ -4341,7 +4550,23 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
     function showWinPopup(amount) {
       const wp = scene.winPopup;
       if (!wp || !wp.container) return;
-      wp.amtText.text = fmtCash(amount || 0);
+      const won = amount > 0;
+      // Win round → show "WIN" header + the dollar amount in gold.
+      // Lose round → hide both texts; the dim overlay + REPEAT BET
+      // button is the only thing the player sees.
+      if (won) {
+        if (wp.lblText) {
+          wp.lblText.visible = true;
+          wp.lblText.text = 'WIN';
+        }
+        wp.amtText.visible = true;
+        wp.amtText.text = fmtCash(amount);
+        wp.amtText.style.fill = 0xFFD23F;
+        wp.amtText.style.fontSize = 56 * (L.gameScale || 1);
+      } else {
+        if (wp.lblText) wp.lblText.visible = false;
+        wp.amtText.visible = false;
+      }
       wp.container.visible = true;
       gsap.killTweensOf(wp.container);
       gsap.killTweensOf(wp.container.scale);
@@ -4358,9 +4583,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       });
     }
     // Round status — drives the text near the spin button. Also gates
-    // the centre-of-grid REPEAT BET overlay + the popup glow. The glow
-    // fires together with REPEAT BET on every resolved round, regardless
-    // of outcome — losing rounds get the same halo with $0.00 readout.
+    // the centre-of-grid REPEAT BET overlay + the popup glow.
     function setRoundStatus(state, info = {}) {
       roundStatus = state;
       scene._lastStatusInfo = info;
@@ -4394,6 +4617,10 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       }
       scene.statusText.text = text;
       scene.statusText.style.fill = fill;
+      // Subtitle is only meaningful during the bet-placement prompt.
+      if (scene.statusSubtext) {
+        scene.statusSubtext.visible = (text === 'PLACE YOUR BETS');
+      }
     }
     function updateSpinButtonState() {
       const btn = scene.spinBtn;
@@ -5351,7 +5578,16 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         for (const f of fired) {
           const officer = scene.officers && scene.officers[f.corner];
           if (!officer) continue;
-          const start = officer._cornerCenter;
+          // Read the officer figure's CURRENT world position so the
+          // badge flies from wherever the patrol has them at this
+          // moment, not the original spawn point.
+          let start = officer._cornerCenter;
+          if (officer._officerFigure && typeof officer._officerFigure.toGlobal === 'function') {
+            try {
+              const liveStart = officer._officerFigure.toGlobal({ x: 0, y: 0 });
+              if (liveStart && typeof liveStart.x === 'number') start = liveStart;
+            } catch (e) {}
+          }
           const targetCell = scene.ringCells && scene.ringCells[f.ringPos];
           if (!targetCell) continue;
           const oddsTxt = scene.arrowOddsTexts && scene.arrowOddsTexts[f.ringPos];
@@ -5413,40 +5649,78 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
               }
               const boosted = oldShown * f.multiplier;
 
-              // 1) Impact flash — radial burst that expands and fades.
+              // ── Impact-weight scale ──
+              // Bigger multipliers don't render bigger — they HIT
+              // bigger. Scale up the flash, the shake, the bounce
+              // and add stage-shake punctuation for the tiers that
+              // matter (≥10× / ≥25× / ≥50×).
+              //   tiny (2 / 4):    factor 0.85  — light impact
+              //   medium (10):     factor 1.20  — standard
+              //   big (25 / 50):   factor 1.70  — heavier shake, stage shake
+              //   huge (100 +):    factor 2.40  — full-grid stage shake
+              const m = f.multiplier;
+              const huge   = m >= 100;
+              const big    = m >= 25;
+              const medium = m >= 10;
+              const factor = huge ? 2.40 : big ? 1.70 : medium ? 1.20 : 0.85;
+              const _gs = (L && L.gameScale) || 1;
+
+              // 1) Impact flash — radial burst that scales with the tier.
               const flash = new PIXI.Graphics();
-              flash.beginFill(0xFFD23F, 0.9);
+              flash.beginFill(0xFFD23F, Math.min(1, 0.7 + factor * 0.12));
               flash.drawCircle(0, 0, L.cellSize * 0.18);
               flash.endFill();
               flash.x = end.x; flash.y = end.y;
               flash.scale.set(0.4);
               scene.fxLayer.addChild(flash);
+              const flashEnd = 2.0 + factor * 0.9;        // 2.7 → 4.16
+              const flashDur = 0.40 + Math.min(0.30, factor * 0.10);
               gsap.timeline({ onComplete: () => { try { flash.destroy(); } catch (e) {} } })
-                .to(flash.scale, { x: 2.6, y: 2.6, duration: 0.45, ease: 'power2.out' }, 0)
-                .to(flash,       { alpha: 0,        duration: 0.45, ease: 'power2.out' }, 0);
+                .to(flash.scale, { x: flashEnd, y: flashEnd, duration: flashDur, ease: 'power2.out' }, 0)
+                .to(flash,       { alpha: 0,                  duration: flashDur, ease: 'power2.out' }, 0);
+              // For big/huge multipliers, fire a SECOND ring outward
+              // for an extra punch beat.
+              if (big) {
+                const ring = new PIXI.Graphics();
+                ring.lineStyle(2 * _gs, 0xFFD23F, 0.9);
+                ring.drawCircle(0, 0, L.cellSize * 0.20);
+                ring.x = end.x; ring.y = end.y;
+                ring.scale.set(0.3);
+                scene.fxLayer.addChild(ring);
+                gsap.timeline({ onComplete: () => { try { ring.destroy(); } catch (e) {} } })
+                  .to(ring.scale, { x: 3.0 + factor * 0.3, y: 3.0 + factor * 0.3, duration: 0.55, ease: 'power2.out' }, 0)
+                  .to(ring,       { alpha: 0, duration: 0.55, ease: 'power2.out' }, 0);
+              }
 
-              // 2) Cell shake — short damped horizontal wobble.
-              const _gs = (L && L.gameScale) || 1;
+              // 2) Cell shake — amplitude scales with tier.
               const baseX = cellCont.x;
+              const sh = 6 * _gs * factor;
               gsap.killTweensOf(cellCont, 'x');
               gsap.timeline({ onComplete: () => { cellCont.x = baseX; } })
-                .to(cellCont, { x: baseX + 6 * _gs, duration: 0.05, ease: 'power2.out' })
-                .to(cellCont, { x: baseX - 6 * _gs, duration: 0.07, ease: 'power2.inOut' })
-                .to(cellCont, { x: baseX + 4 * _gs, duration: 0.06, ease: 'power2.inOut' })
-                .to(cellCont, { x: baseX - 2 * _gs, duration: 0.06, ease: 'power2.inOut' })
-                .to(cellCont, { x: baseX,           duration: 0.06, ease: 'power2.out' });
+                .to(cellCont, { x: baseX + sh,         duration: 0.05, ease: 'power2.out' })
+                .to(cellCont, { x: baseX - sh,         duration: 0.07, ease: 'power2.inOut' })
+                .to(cellCont, { x: baseX + sh * 0.65,  duration: 0.06, ease: 'power2.inOut' })
+                .to(cellCont, { x: baseX - sh * 0.35,  duration: 0.06, ease: 'power2.inOut' })
+                .to(cellCont, { x: baseX,              duration: 0.06, ease: 'power2.out' });
 
-              // 3) Text bounces big — bright lime fill, no muddying
-              // stroke. Stays at 1.18× baseline scale so it's visibly
-              // louder than the unboosted siblings.
+              // 2b) STAGE SHAKE — only for the big tiers. The whole
+              // canvas wobbles, not just the cell. This is what makes
+              // a 50× / 100× hit feel different from a 4× hit.
+              if (big && typeof shakeStage === 'function') {
+                shakeStage(huge ? 12 * _gs : 7 * _gs, huge ? 0.55 : 0.40);
+              }
+
+              // 3) Text bounces — overshoot scale ramps with the tier.
               oddsTxt.style.fill = 0x6FFFA0;
               oddsTxt.style.stroke = 0;
               oddsTxt.style.strokeThickness = 0;
               oddsTxt.style.fontWeight = '900';
               gsap.killTweensOf(oddsTxt.scale);
+              const overshoot = 1.6 + factor * 0.25;     // 1.81 → 2.20
+              const restScale = 1.10 + Math.min(0.20, factor * 0.05);
               gsap.fromTo(oddsTxt.scale,
-                { x: 1.95, y: 1.95 },
-                { x: 1.18, y: 1.18, duration: 0.70, ease: 'elastic.out(1.6, 0.4)' });
+                { x: overshoot, y: overshoot },
+                { x: restScale, y: restScale, duration: 0.70, ease: 'elastic.out(1.6, 0.4)' });
 
               // 3b) Side indicator — small green up-chevron pinned
               // RIGHT NEXT TO the multiplier text so the two read as
@@ -7110,6 +7384,13 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         if (totalWin >= 10 * totalWager) {
           shakeStage(8 * (L.gameScale || 1), 0.45);
           pulseWinPill();
+        }
+        // Breather — give the player a moment to register the last
+        // exit / pay-text / officer hit before the round-end popup
+        // slides in. Skipped after a clearance celebration since the
+        // YAY! tap already broke the rhythm.
+        if (!_isClearance) {
+          await animator._wait(700);
         }
         // Round done — bets cleared, status reflects outcome. For a
         // clearance round we get here AFTER the player tapped YAY,
