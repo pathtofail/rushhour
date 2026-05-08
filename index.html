@@ -23,6 +23,44 @@
       text-transform: uppercase;
     }
     #pixi-canvas { display: block; width: 100vw; height: 100vh; }
+
+    /* Portrait lock — phone-landscape gets a full-screen "rotate"
+       overlay. Triggered by viewports that are short AND wider than
+       tall, which catches every phone in landscape but leaves tablets
+       and desktops alone. The pixi canvas keeps rendering underneath
+       (no need to pause game state); the overlay sits above it.       */
+    #rotate-overlay {
+      position: fixed; inset: 0;
+      display: none;
+      align-items: center; justify-content: center;
+      flex-direction: column;
+      background: #0E1A24;
+      color: #FFD54F;
+      z-index: 9999;
+      text-align: center;
+      padding: 24px;
+    }
+    #rotate-overlay .rotate-icon {
+      font-size: 64px; line-height: 1;
+      animation: rotate-bounce 1.6s ease-in-out infinite;
+      margin-bottom: 18px;
+    }
+    #rotate-overlay h2 {
+      margin: 0 0 6px; font-size: 20px; font-weight: 800;
+      letter-spacing: 2px; text-transform: uppercase;
+      color: #FFFFFF;
+    }
+    #rotate-overlay p {
+      margin: 0; font-size: 13px; color: #A8AEB6; letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+    @keyframes rotate-bounce {
+      0%, 100% { transform: rotate(-90deg); }
+      50%      { transform: rotate(0deg); }
+    }
+    @media (orientation: landscape) and (max-height: 500px) {
+      #rotate-overlay { display: flex; }
+    }
   </style>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -32,6 +70,11 @@
 </head>
 <body>
   <div id="boot-msg">Loading…</div>
+  <div id="rotate-overlay" aria-hidden="true">
+    <div class="rotate-icon">📱</div>
+    <h2>Please rotate your device</h2>
+    <p>This game plays in portrait</p>
+  </div>
 
   <script>
   (async function () {
@@ -1408,15 +1451,22 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
                                      //  GAME MODE caption + mode-button row
                                      //  at the top of the canvas.
     const HUD_RATIO   = 200 / 96;   // hudReserve / cellSize (pills + spin button)
-    const FRAME_HPAD  = 80;         // px of horizontal margin around the frame
+    const FRAME_HPAD  = 80;         // px of horizontal margin around the frame (desktop)
+    const FRAME_HPAD_MOBILE = 12;   // tight margin on phones — every px counts
     const FILL_RATIO  = 0.82;       // shrink the fit to leave canvas margin
     const MAX_CELL    = 96;         // hard cap so frame never balloons on 4K
+    // Anything narrower than this gets the vertical mobile layout.
+    // 600px catches every phone in portrait + small tablets in portrait;
+    // standard tablets + every desktop landscape resolution stay above.
+    const MOBILE_BREAKPOINT = 600;
     let _layoutCache = null;
     function layout() {
       const sw = app.screen.width, sh = app.screen.height;
       if (_layoutCache && _layoutCache.sw === sw && _layoutCache.sh === sh) {
         return _layoutCache;
       }
+      const isMobile = sw < MOBILE_BREAKPOINT;
+      const hpad = isMobile ? FRAME_HPAD_MOBILE : FRAME_HPAD;
       // Stake-style layout:
       //   ┌─────────────── top bar ────────────────┐
       //   │   [info] BAL   WIN                     │
@@ -1433,30 +1483,43 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       const FRAME_W_CELLS = GAME.COLS + (isAllAround ? 2 : (isActivator ? 0 : 1));
       const FRAME_H_CELLS = GAME.ROWS + (isAllAround ? 2 : 1);
       // Layout bands (top→bottom):
-      //   topBarH       slim, info + balance pill
+      //   topBarH       slim, info + balance pill (mobile uses this for INFO+BALANCE)
       //   winBandH      big WIN headline + status subtitle
       //   (grid)
       //   bottomPanelH  chips + total + CLEAR + REPEAT + PLAY
       //   bottomPad
-      // Mode buttons removed; BALANCE moved to the bottom panel.
-      // Top band is now just a small safe-area reserve.
-      const topBarH      = 16;
-      // winBandH must fit: WIN headline (~48px) + inner gap (~6px) +
-      // status text (~14px) + HUD breathing room (~24px) = ~92px.
-      const winBandH     = 100;
-      // Bottom panel — single primary row. The chip column has its
-      // own internal stack: BALANCE pill on top, chips below; the
-      // other elements (info, clear/repeat, TOTAL BET, PLAY) span
-      // the full panel height beside it.
-      const bottomPanelH = 130;
-      const bottomPad    = 14;
+      //
+      // Mobile (sw < MOBILE_BREAKPOINT): vertical stack of rows
+      //   ┌────────────┐
+      //   │ INFO  BAL  │  topBarH
+      //   │ WIN $0     │  winBandH
+      //   │ PLACE BETS │
+      //   │ ┌────────┐ │
+      //   │ │  grid  │ │
+      //   │ └────────┘ │
+      //   │ chips      │  bottomPanelH (stacked rows)
+      //   │ ctrl total │
+      //   │ PLAY       │
+      //   └────────────┘
+      const topBarH = isMobile ? 44 : 16;          // mobile: room for INFO + BALANCE row
+      // winBandH must fit: WIN headline + inner gap + status text +
+      // HUD breathing room. Mobile uses smaller fonts so band shrinks.
+      const winBandH = isMobile ? 76 : 100;
+      // Mobile bottom panel hosts 4 rows: chips · ctrl row · TOTAL · PLAY
+      // (with breathing room). Desktop: single dense row + balance/chips
+      // column on the left side of the cluster.
+      const bottomPanelH = isMobile ? 240 : 130;
+      const bottomPad    = isMobile ? 8 : 14;
       const horizK = FRAME_W_CELLS + (FRAME_W_CELLS - 1) * GAP_RATIO;
       const vertK  = FRAME_H_CELLS + (FRAME_H_CELLS - 1) * GAP_RATIO;
-      const availW = sw - 2 * FRAME_HPAD;
+      const availW = sw - 2 * hpad;
       const availH = sh - topBarH - winBandH - bottomPanelH - bottomPad;
       const cellH  = availW / horizK;
       const cellV  = availH / vertK;
-      let cellSize = Math.min(cellH, cellV) * FILL_RATIO;
+      // Mobile fills more of the available area; the canvas is already
+      // tight so the FILL_RATIO leaves less unused space.
+      const fillRatio = isMobile ? 0.96 : FILL_RATIO;
+      let cellSize = Math.min(cellH, cellV) * fillRatio;
       cellSize = Math.min(cellSize, MAX_CELL);
       cellSize = Math.max(20, Math.floor(cellSize));
       const cellGap   = cellSize * GAP_RATIO;
@@ -1465,10 +1528,10 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       const frameH    = cellSize * FRAME_H_CELLS + cellGap * (FRAME_H_CELLS - 1);
       // Grid is centred horizontally; bottom panel + WIN band + top bar
       // each take their own horizontal slice.
-      const frameX = Math.max(FRAME_HPAD, (sw - frameSize) / 2);
+      const frameX = Math.max(hpad, (sw - frameSize) / 2);
       const frameY = topBarH + winBandH + Math.max(8, (availH - frameH) / 2);
       _layoutCache = {
-        sw, sh, gameScale, cellSize, cellGap,
+        sw, sh, isMobile, hpad, gameScale, cellSize, cellGap,
         frameSize, frameH, frameX, frameY,
         topBarH, winBandH, bottomPanelH, bottomPad,
         titleH: topBarH, hudReserve: 0,
@@ -2170,7 +2233,11 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
     let _openSimpleModalCount = 0;
     function _openSimpleModal({ title, bodyLines, buttons }) {
       const sw = L.sw, sh = L.sh;
-      const scale = Math.min(1, Math.min(sw / 900, sh / 900));
+      // Mobile: scale so the simple modal isn't postage-stamp sized.
+      // Desktop: original cap (1.0 at 900×900+).
+      const scale = L.isMobile
+        ? Math.min(sw * 0.92 / 540, sh * 0.85 / 540)
+        : Math.min(1, Math.min(sw / 900, sh / 900));
 
       const modal = new PIXI.Container();
       modal.alpha = 0;
@@ -2367,7 +2434,13 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       if (scene.paytableModal) return;
       const modal = new PIXI.Container();
       const sw = L.sw, sh = L.sh;
-      const scale = Math.min(1, Math.min(sw / 900, sh / 900));
+      // Mobile: scale so the panel fills most of the canvas (panel
+      // dimensions are clamped at sw*0.94 / sh*0.92 below, so we pick
+      // whichever constraint binds first).
+      // Desktop: capped at 1.0 (fits a 900×900 design at full scale).
+      const scale = L.isMobile
+        ? Math.min(sw * 0.94 / 720, sh * 0.92 / 620)
+        : Math.min(1, Math.min(sw / 900, sh / 900));
 
       // Dimmed backdrop, click-to-close.
       const backdrop = new PIXI.Graphics();
@@ -2854,6 +2927,44 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
           },
         ],
       });
+    }
+
+    // Soft dark radial halo — black-ish at centre fading to fully
+    // transparent at the edge. Used as a "vignette behind a button"
+    // that makes the button read as a popup over the navy canvas
+    // (e.g. end-of-round WIN/REPEAT BET overlay, Clear Bets, etc.).
+    // Returns a Sprite when canvas/getContext is available; a multi-
+    // circle PIXI fallback otherwise (sim sandbox).
+    function makeRadialHalo(diameter) {
+      const size = Math.max(2, Math.round(diameter));
+      try {
+        const c = document.createElement('canvas');
+        if (!c || typeof c.getContext !== 'function') throw 0;
+        c.width = size; c.height = size;
+        const ctx = c.getContext('2d');
+        const r = size / 2;
+        const grad = ctx.createRadialGradient(r, r, 0, r, r, r);
+        grad.addColorStop(0,    'rgba(8, 14, 26, 0.98)');
+        grad.addColorStop(0.45, 'rgba(8, 14, 26, 0.88)');
+        grad.addColorStop(0.80, 'rgba(8, 14, 26, 0.45)');
+        grad.addColorStop(1,    'rgba(8, 14, 26, 0.00)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, size, size);
+        const sp = new PIXI.Sprite(PIXI.Texture.from(c));
+        sp.anchor.set(0.5);
+        return sp;
+      } catch (_) {
+        const g = new PIXI.Graphics();
+        const steps = 12;
+        for (let i = 0; i < steps; i++) {
+          const t = i / steps;
+          const a = 0.95 * Math.max(0, 1 - t * t);
+          g.beginFill(0x080E1A, a);
+          g.drawCircle(0, 0, (size / 2) * (1 - t));
+          g.endFill();
+        }
+        return g;
+      }
     }
 
     function buildScene() {
@@ -3795,25 +3906,25 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       // subtitle directly below it. The whole block hugs the grid so
       // both elements are visually associated with the play area, not
       // the BALANCE pill above.
-      const HUD_BREATH = 24;        // breathing room between HUD blocks and the grid
-      const STATUS_GAP = 6;         // inner gap between WIN amount and status line
+      const HUD_BREATH = L.isMobile ? 14 : 24;   // breathing room between HUD blocks and grid
+      const STATUS_GAP = L.isMobile ? 4 : 6;     // inner gap between WIN amount and status line
       const winCenterX = L.frameX + L.frameSize / 2;
       // Status — anchor bottom-centre, bottom edge sits HUD_BREATH above grid.
       scene.statusText = new PIXI.Text('PLACE YOUR BETS', {
-        fontFamily: FONT, fontSize: 14,
-        fill: 0xFFFFFF, letterSpacing: 3, fontWeight: '700',
+        fontFamily: FONT, fontSize: L.isMobile ? 12 : 14,
+        fill: 0xFFFFFF, letterSpacing: L.isMobile ? 2 : 3, fontWeight: '700',
       });
       scene.statusText.anchor.set(0.5, 1);
       scene.statusText.x = winCenterX;
       // Bumped up a hair to leave room for a subtitle in the gap
       // between status and the grid.
-      scene.statusText.y = L.frameY - HUD_BREATH - 14;
+      scene.statusText.y = L.frameY - HUD_BREATH - (L.isMobile ? 11 : 14);
       scene.stage.addChild(scene.statusText);
       // Subtitle — small helper line under PLACE YOUR BETS, only
       // visible while the player is in the bet phase.
       scene.statusSubtext = new PIXI.Text('You can place multiple bets', {
-        fontFamily: FONT, fontSize: 11,
-        fill: 0xA8AEB6, fontWeight: '500', letterSpacing: 1.2,
+        fontFamily: FONT, fontSize: L.isMobile ? 9 : 11,
+        fill: 0xA8AEB6, fontWeight: '500', letterSpacing: L.isMobile ? 0.8 : 1.2,
       });
       scene.statusSubtext.anchor.set(0.5, 1);
       scene.statusSubtext.x = winCenterX;
@@ -3825,7 +3936,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       // is unambiguous; the smaller font size matches the more compact
       // top-bar feel.
       const bigWinTxt = new PIXI.Text(fmtWin(0), {
-        fontFamily: FONT, fontSize: 28,
+        fontFamily: FONT, fontSize: L.isMobile ? 22 : 28,
         fill: 0xFFD23F, fontWeight: '800',
       });
       bigWinTxt.anchor.set(0.5, 1);
@@ -3842,52 +3953,42 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       };
 
       // ── Bottom panel ───────────────────────────────────────────
-      // Single-row cluster:
-      //   [info]  [BALANCE pill]  ┌── Clear ──┐  [TOTAL BET]  [PLAY]
-      //           [   chips    ]  └── Repeat ─┘
-      // The BALANCE-pill + chips share a single column slot to the
-      // right of info and to the left of the Clear/Repeat stack. Pill
-      // is on top, chips below; both share the chip-cluster width.
+      // Two layouts share the same controls; placement differs.
+      //
+      //   Desktop (sw ≥ MOBILE_BREAKPOINT) — single-row cluster:
+      //     [info]  [BALANCE pill]  ┌── Clear ──┐  [TOTAL BET]  [PLAY]
+      //             [   chips    ]  └── Repeat ─┘
+      //
+      //   Mobile (sw < MOBILE_BREAKPOINT) — vertical stack:
+      //     top bar:  INFO   ────────────────  BALANCE
+      //     panel:    [ chips row, full width ]
+      //               [ Clear ]  [ Repeat ]   (smaller)
+      //               [        TOTAL BET    ]
+      //               [          PLAY       ] (full-width CTA)
       const panelTop    = L.frameY + L.frameH + HUD_BREATH;
       const panelBottom = panelTop + L.bottomPanelH;
       const panelCY     = (panelTop + panelBottom) / 2;
 
-      // Chip selector — 4 small rectangular chips.
-      const chipW   = 44;
-      const chipH   = 28;
-      const chipGap = 10;
+      // Chip selector — small rectangular chips. Mobile uses bigger
+      // tap-target sizes (≥44pt iOS / ≥48dp Android minimum).
+      const chipW   = L.isMobile ? 60 : 44;
+      const chipH   = L.isMobile ? 44 : 28;
+      const chipGap = L.isMobile ? 12 : 10;
       const chipsW  = CHIP_VALUES.length * chipW + (CHIP_VALUES.length - 1) * chipGap;
-      const totalBoxW = 150;
-      const totalBoxH = 56;
-      // Stacked control column — Clear Bets (top) over Repeat Bet (bottom).
-      const ctrlW         = 110;
-      const ctrlH         = 28;
+      // TOTAL BET — full-width slim row on mobile; fixed-size box on desktop.
+      const totalBoxW = L.isMobile ? Math.min(L.sw - 2 * L.hpad, 360) : 150;
+      const totalBoxH = L.isMobile ? 40 : 56;
+      // CLEAR / REPEAT controls — sized for thumb taps on mobile.
+      const ctrlW = L.isMobile ? Math.floor((Math.min(L.sw - 2 * L.hpad, 360) - 12) / 2) : 110;
+      const ctrlH = L.isMobile ? 44 : 28;
       const stackInnerGap = 4;
-      const stackH        = ctrlH * 2 + stackInnerGap;   // 60
-      // PLAY — taller now that controls aren't on top of it.
-      const playW    = 180;
-      const playH    = 60;
+      const stackH        = ctrlH * 2 + stackInnerGap;
+      // PLAY button — full canvas-width on mobile.
+      const playW = L.isMobile ? Math.min(L.sw - 2 * L.hpad, 360) : 180;
+      const playH = L.isMobile ? 56 : 60;
       const sectionGap = 26;
 
-      // BALANCE pill sits ABOVE the chips, same width as chips. Both
-      // are housed in a single "chip column" slot. Combined height
-      // (pill + gap + chips) is sized to match the PLAY button + the
-      // TOTAL BET box on the right side of the cluster (~60).
-      const balancePillH = 28;
-      const colInnerGap  = 4;
-      const colH         = balancePillH + colInnerGap + chipH;
-      const colTop       = panelCY - colH / 2;
-      const balancePillCY = colTop + balancePillH / 2;
-      const chipsRowCY    = colTop + balancePillH + colInnerGap + chipH / 2;
-
-      // Row total: chips column + ctrl stack + TOTAL BET box + PLAY.
-      const rowW = chipsW + sectionGap + ctrlW + sectionGap + totalBoxW + sectionGap + playW;
-      const rowLeft = (L.sw - rowW) / 2;
-      // Info button sits just left of the chips column.
-      scene.infoBtn.x = rowLeft - 18 - infoSize / 2;
-      scene.infoBtn.y = panelCY;
-
-      // ── BALANCE pill (top of chip column, same width as chips) ──
+      // ── Helpers (shared between layouts) ──────────────────────
       const makeBalancePill = (label, value, w, h) => {
         const cont = new PIXI.Container();
         const bg = new PIXI.Graphics();
@@ -3903,8 +4004,6 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         const val = new PIXI.Text(value, {
           fontFamily: FONT, fontSize: 14, fill: 0xFFFFFF, fontWeight: '800',
         });
-        // Same row: label hugs left edge, value hugs right edge —
-        // mirrors the TOTAL BET pill on the other side of the cluster.
         const padX = 10;
         lbl.anchor.set(0, 0.5);
         val.anchor.set(1, 0.5);
@@ -3916,24 +4015,17 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         cont.valText = val;
         return cont;
       };
-      scene.balancePill = makeBalancePill('BALANCE', fmtCash(player.balance), chipsW, balancePillH);
-      scene.balancePill.x = rowLeft + chipsW / 2;
-      scene.balancePill.y = balancePillCY;
-      scene.stage.addChild(scene.balancePill);
-
-      // Chip selector — small rectangular chips.
       const makeChipButton = (value) => {
         const cont = new PIXI.Container();
         cont._chipValue = value;
         const bg = new PIXI.Graphics();
         const txt = new PIXI.Text(`$${value}`, {
-          fontFamily: FONT, fontSize: 13, fill: 0xFFFFFF, fontWeight: '800',
+          fontFamily: FONT, fontSize: L.isMobile ? 16 : 13,
+          fill: 0xFFFFFF, fontWeight: '800',
         });
         txt.anchor.set(0.5);
         cont._draw = (active) => {
           bg.clear();
-          // Inactive = cool dark slate, white $; active = saturated
-          // yellow, dark $ — saturation contrast pop selects state.
           bg.lineStyle(active ? 3 : 2, active ? 0x1A2332 : 0xFFD23F, 1);
           bg.beginFill(active ? 0xFFD23F : 0x2A3548, 1);
           bg.drawRoundedRect(-chipW / 2, -chipH / 2, chipW, chipH, 10);
@@ -3951,147 +4043,236 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         cont.on('pointertap',  () => setChipValue(value));
         return cont;
       };
-      // ── Chips row, sitting under the BALANCE pill ──────────────
-      scene.chipBtns = [];
-      let chipX = rowLeft + chipW / 2;
-      for (const v of CHIP_VALUES) {
-        const c = makeChipButton(v);
-        c.x = chipX;
-        c.y = chipsRowCY;
-        scene.stage.addChild(c);
-        scene.chipBtns.push(c);
-        chipX += chipW + chipGap;
-      }
-      const afterChipsX = rowLeft + chipsW + sectionGap;
-
-      // Control buttons — CLEAR ALL + REPEAT only.
-      const makeControlButton = (label, accent, onTap) => {
+      const makeControlButton = (label, accent, onTap, w = ctrlW, h = ctrlH, opts = {}) => {
         const cont = new PIXI.Container();
+        // Optional dark radial halo behind the button — gives the same
+        // "vignette popup" treatment as the end-of-round WIN overlay.
+        // Sized ~1.6× the button width so the glow extends visibly past
+        // the pill edges without spilling across the whole row.
+        if (opts.halo) {
+          const halo = makeRadialHalo(Math.max(w * 1.6, h * 3.2));
+          halo.x = 0; halo.y = 0;
+          cont.addChild(halo);
+        }
         const bg = new PIXI.Graphics();
         const draw = (hover = false) => {
           bg.clear();
           bg.lineStyle(2, accent, 1);
           bg.beginFill(hover ? 0x3D4A66 : 0x2A3548, 1);
-          bg.drawRoundedRect(-ctrlW / 2, -ctrlH / 2, ctrlW, ctrlH, 10);
+          bg.drawRoundedRect(-w / 2, -h / 2, w, h, 10);
           bg.endFill();
         };
         draw();
         cont.addChild(bg);
         const t = new PIXI.Text(label, {
-          fontFamily: FONT, fontSize: 11, fill: 0xFFFFFF,
-          fontWeight: '800', letterSpacing: 1.2,
+          fontFamily: FONT, fontSize: L.isMobile ? 13 : 11,
+          fill: 0xFFFFFF, fontWeight: '800', letterSpacing: 1.2,
         });
         t.anchor.set(0.5);
         cont.addChild(t);
         cont.eventMode = 'static';
         cont.cursor = 'pointer';
-        cont.hitArea = new PIXI.Rectangle(-ctrlW / 2, -ctrlH / 2, ctrlW, ctrlH);
+        cont.hitArea = new PIXI.Rectangle(-w / 2, -h / 2, w, h);
         cont.on('pointerover', () => { draw(true); });
         cont.on('pointerout',  () => { draw(false); });
         cont.on('pointertap', onTap);
         return cont;
       };
-      // Vertical control stack — Clear Bets (top) + Repeat Bet (bottom),
-      // sitting between the chips and TOTAL BET. Same column, stacked
-      // top-down with stackInnerGap between rows.
-      const stackTopRowCY    = panelCY - (stackH / 2) + ctrlH / 2;
-      const stackBottomRowCY = panelCY + (stackH / 2) - ctrlH / 2;
-      const stackCX          = afterChipsX + ctrlW / 2;
+      const makeTotalBetBox = (cx, cy, w, h) => {
+        const totalBg = new PIXI.Graphics();
+        totalBg.lineStyle(2, 0xFFD23F, 1);
+        totalBg.beginFill(0x2A3548, 1);
+        totalBg.drawRoundedRect(cx - w / 2, cy - h / 2, w, h, 10);
+        totalBg.endFill();
+        scene.stage.addChild(totalBg);
+        if (L.isMobile) {
+          // Slim inline row: "TOTAL BET" left, value right.
+          const lbl = new PIXI.Text('TOTAL BET', {
+            fontFamily: FONT, fontSize: 11, fill: 0xFFD23F,
+            letterSpacing: 1.6, fontWeight: '700',
+          });
+          lbl.anchor.set(0, 0.5);
+          lbl.x = cx - w / 2 + 14;
+          lbl.y = cy;
+          scene.stage.addChild(lbl);
+          const txt = new PIXI.Text(fmtCash(0), {
+            fontFamily: FONT, fontSize: 16, fill: 0xFFFFFF, fontWeight: '800',
+          });
+          txt.anchor.set(1, 0.5);
+          txt.x = cx + w / 2 - 14;
+          txt.y = cy;
+          scene.stage.addChild(txt);
+          scene.totalBetPill = { valText: txt };
+        } else {
+          // Stacked label-on-top layout — original desktop look.
+          const lbl = new PIXI.Text('TOTAL BET', {
+            fontFamily: FONT, fontSize: 9, fill: 0xFFD23F,
+            letterSpacing: 1.8, fontWeight: '700',
+          });
+          lbl.anchor.set(0.5);
+          lbl.x = cx;
+          lbl.y = cy - h / 2 + 12;
+          scene.stage.addChild(lbl);
+          const txt = new PIXI.Text(fmtCash(0), {
+            fontFamily: FONT, fontSize: 20, fill: 0xFFFFFF, fontWeight: '800',
+          });
+          txt.anchor.set(0.5);
+          txt.x = cx;
+          txt.y = cy + 8;
+          scene.stage.addChild(txt);
+          scene.totalBetPill = { valText: txt };
+        }
+      };
+      const makePlayButton = (cx, cy, w, h) => {
+        const btn = new PIXI.Container();
+        btn.x = cx; btn.y = cy;
+        const playBg = new PIXI.Graphics();
+        const drawPlay = (hover = false, dim = false) => {
+          playBg.clear();
+          playBg.lineStyle(2, 0x065F46, 1);
+          playBg.beginFill(dim ? 0x065F46 : (hover ? 0x34D399 : 0x10B981), 1);
+          playBg.drawRoundedRect(-w / 2, -h / 2, w, h, 10);
+          playBg.endFill();
+        };
+        drawPlay();
+        btn.addChild(playBg);
+        const playLbl = new PIXI.Text('PLAY', {
+          fontFamily: FONT, fontSize: L.isMobile ? 22 : 24,
+          fill: 0xFFFFFF, fontWeight: '800', letterSpacing: 5,
+        });
+        playLbl.anchor.set(0.5);
+        btn.addChild(playLbl);
+        btn.eventMode = 'static'; btn.cursor = 'pointer';
+        btn.hitArea = new PIXI.Rectangle(-w / 2, -h / 2, w, h);
+        btn.on('pointerover', () => { if (!btn.busy) { drawPlay(true);  gsap.to(btn.scale, { x: 1.02, y: 1.02, duration: 0.12 }); } });
+        btn.on('pointerout',  () => { if (!btn.busy) { drawPlay(false); gsap.to(btn.scale, { x: 1, y: 1, duration: 0.12 }); } });
+        btn.on('pointerdown', () => { if (!btn.busy) gsap.to(btn.scale, { x: 0.97, y: 0.97, duration: 0.08 }); });
+        btn.on('pointerup',   () => gsap.to(btn.scale, { x: 1, y: 1, duration: 0.12, ease: 'back.out(2)' }));
+        btn.on('pointertap',  () => onSpinClick());
+        btn._setBusy = (b) => {
+          btn.busy = b;
+          btn.alpha = b ? 0.55 : 1;
+          btn.cursor = b ? 'default' : 'pointer';
+          if (b) {
+            playLbl.text = 'UNJAMMING';
+            playLbl.style.fontSize = L.isMobile ? 14 : 16;
+            playLbl.style.letterSpacing = 1.5;
+          } else {
+            playLbl.text = 'PLAY';
+            playLbl.style.fontSize = L.isMobile ? 22 : 24;
+            playLbl.style.letterSpacing = 5;
+          }
+          drawPlay(false, b);
+        };
+        scene.stage.addChild(btn);
+        return btn;
+      };
 
       scene.ctrlButtons = {};
-      const clearBtn = makeControlButton('Clear Bets', 0xE63946, () => clearAllArrowBets());
-      clearBtn.x = stackCX;
-      clearBtn.y = stackTopRowCY;
-      scene.stage.addChild(clearBtn);
-      scene.ctrlButtons.clear = clearBtn;
-      const repeatBtn = makeControlButton('Repeat Bet', 0xFFD23F, () => repeatLastBets());
-      repeatBtn.x = stackCX;
-      repeatBtn.y = stackBottomRowCY;
-      scene.stage.addChild(repeatBtn);
-      scene.ctrlButtons.repeat = repeatBtn;
-
-      // TOTAL BET — boxed display, now to the RIGHT of the control stack.
-      const afterStackX = afterChipsX + ctrlW + sectionGap;
-      const totalBoxX = afterStackX;
-      const totalBg = new PIXI.Graphics();
-      totalBg.lineStyle(2, 0xFFD23F, 1);
-      totalBg.beginFill(0x2A3548, 1);
-      totalBg.drawRoundedRect(totalBoxX, panelCY - totalBoxH / 2, totalBoxW, totalBoxH, 10);
-      totalBg.endFill();
-      scene.stage.addChild(totalBg);
-      const totalLabel = new PIXI.Text('TOTAL BET', {
-        fontFamily: FONT, fontSize: 9, fill: 0xFFD23F, letterSpacing: 1.8, fontWeight: '700',
-      });
-      totalLabel.anchor.set(0.5);
-      totalLabel.x = totalBoxX + totalBoxW / 2;
-      totalLabel.y = panelCY - totalBoxH / 2 + 12;
-      scene.stage.addChild(totalLabel);
-      const totalTxt = new PIXI.Text(fmtCash(0), {
-        fontFamily: FONT, fontSize: 20, fill: 0xFFFFFF, fontWeight: '800',
-      });
-      totalTxt.anchor.set(0.5);
-      totalTxt.x = totalBoxX + totalBoxW / 2;
-      totalTxt.y = panelCY + 8;
-      scene.stage.addChild(totalTxt);
-      scene.totalBetPill = { valText: totalTxt };
-      const afterTotalX = totalBoxX + totalBoxW + sectionGap;
-
-      // PLAY button — far right, taller than the controls so the CTA
-      // dominates the row.
-      const playCX = afterTotalX + playW / 2;
-      const playCY = panelCY;
-      const btn = new PIXI.Container();
-      btn.x = playCX; btn.y = playCY;
-      const playBg = new PIXI.Graphics();
-      const drawPlay = (hover = false, dim = false) => {
-        playBg.clear();
-        // 10% — saturated emerald green CTA. Universal "GO" affordance —
-        // every start/play/install button in software is green for a
-        // reason that overrides abstract colour-wheel contrast: users
-        // pattern-match green = proceed instantly. Hover brightens; dim
-        // when busy.
-        playBg.lineStyle(2, 0x065F46, 1);
-        playBg.beginFill(dim ? 0x065F46 : (hover ? 0x34D399 : 0x10B981), 1);
-        playBg.drawRoundedRect(-playW / 2, -playH / 2, playW, playH, 10);
-        playBg.endFill();
-      };
-      drawPlay();
-      btn.addChild(playBg);
-      const playLbl = new PIXI.Text('PLAY', {
-        fontFamily: FONT, fontSize: 24,
-        fill: 0xFFFFFF, fontWeight: '800', letterSpacing: 5,
-      });
-      playLbl.anchor.set(0.5);
-      btn.addChild(playLbl);
-      btn.eventMode = 'static'; btn.cursor = 'pointer';
-      btn.hitArea = new PIXI.Rectangle(-playW / 2, -playH / 2, playW, playH);
-      btn.on('pointerover', () => { if (!btn.busy) { drawPlay(true);  gsap.to(btn.scale, { x: 1.02, y: 1.02, duration: 0.12 }); } });
-      btn.on('pointerout',  () => { if (!btn.busy) { drawPlay(false); gsap.to(btn.scale, { x: 1, y: 1, duration: 0.12 }); } });
-      btn.on('pointerdown', () => { if (!btn.busy) gsap.to(btn.scale, { x: 0.97, y: 0.97, duration: 0.08 }); });
-      btn.on('pointerup',   () => gsap.to(btn.scale, { x: 1, y: 1, duration: 0.12, ease: 'back.out(2)' }));
-      btn.on('pointertap',  () => onSpinClick());
-      btn._setBusy = (b) => {
-        btn.busy = b;
-        btn.alpha = b ? 0.55 : 1;
-        btn.cursor = b ? 'default' : 'pointer';
-        // "UNJAMMING" is much wider than "PLAY", so when busy we
-        // shrink the font + tighten the letter-spacing so the label
-        // fits inside the green pill cleanly.
-        if (b) {
-          playLbl.text = 'UNJAMMING';
-          playLbl.style.fontSize = 16;
-          playLbl.style.letterSpacing = 1.5;
-        } else {
-          playLbl.text = 'PLAY';
-          playLbl.style.fontSize = 24;
-          playLbl.style.letterSpacing = 5;
-        }
-        drawPlay(false, b);
-      };
-      scene.stage.addChild(btn);
-      scene.spinBtn = btn;
       // BUY FEATURE intentionally off in rush mode.
       scene.buyBtn = null;
+
+      if (L.isMobile) {
+        // ─── Mobile portrait: top bar + vertical bottom panel ─────
+        // Top bar — INFO icon left, BALANCE pill right.
+        const tbCY = L.topBarH / 2;
+        scene.infoBtn.x = L.hpad + infoSize / 2;
+        scene.infoBtn.y = tbCY;
+        const balW = Math.min(190, L.sw / 2);
+        scene.balancePill = makeBalancePill('BALANCE', fmtCash(player.balance), balW, 28);
+        scene.balancePill.x = L.sw - L.hpad - balW / 2;
+        scene.balancePill.y = tbCY;
+        scene.stage.addChild(scene.balancePill);
+
+        // Bottom panel — vertical stack. Compute row Y positions
+        // so heights add up to bottomPanelH.
+        const ROW_GAP = 12;
+        const rowsH   = chipH + ctrlH + totalBoxH + playH;
+        const totalGaps = ROW_GAP * 3;
+        const stackTop  = panelTop + (L.bottomPanelH - rowsH - totalGaps) / 2;
+        const chipsRowCY = stackTop + chipH / 2;
+        const ctrlRowCY  = chipsRowCY + chipH / 2 + ROW_GAP + ctrlH / 2;
+        const totalCY    = ctrlRowCY  + ctrlH / 2 + ROW_GAP + totalBoxH / 2;
+        const playCY     = totalCY    + totalBoxH / 2 + ROW_GAP + playH / 2;
+        const centerX    = L.sw / 2;
+
+        // Chips row (centred).
+        scene.chipBtns = [];
+        let cX = centerX - chipsW / 2 + chipW / 2;
+        for (const v of CHIP_VALUES) {
+          const c = makeChipButton(v);
+          c.x = cX; c.y = chipsRowCY;
+          scene.stage.addChild(c);
+          scene.chipBtns.push(c);
+          cX += chipW + chipGap;
+        }
+        // Ctrl row — Clear | Repeat side-by-side.
+        const ctrlGap = 12;
+        const ctrlPairW = ctrlW * 2 + ctrlGap;
+        const clearCX = centerX - ctrlPairW / 2 + ctrlW / 2;
+        const repeatCX = centerX + ctrlPairW / 2 - ctrlW / 2;
+        const clearBtn = makeControlButton('Clear Bets', 0xE63946, () => clearAllArrowBets());
+        clearBtn.x = clearCX; clearBtn.y = ctrlRowCY;
+        scene.stage.addChild(clearBtn);
+        scene.ctrlButtons.clear = clearBtn;
+        const repeatBtn = makeControlButton('Repeat Bet', 0xFFD23F, () => repeatLastBets());
+        repeatBtn.x = repeatCX; repeatBtn.y = ctrlRowCY;
+        scene.stage.addChild(repeatBtn);
+        scene.ctrlButtons.repeat = repeatBtn;
+        // TOTAL BET — full-width slim row.
+        makeTotalBetBox(centerX, totalCY, totalBoxW, totalBoxH);
+        // PLAY — full-width CTA at the bottom.
+        scene.spinBtn = makePlayButton(centerX, playCY, playW, playH);
+      } else {
+        // ─── Desktop: single-row cluster (unchanged geometry) ────
+        // BALANCE pill sits ABOVE the chips, same width as chips.
+        const balancePillH = 28;
+        const colInnerGap  = 4;
+        const colH         = balancePillH + colInnerGap + chipH;
+        const colTop       = panelCY - colH / 2;
+        const balancePillCY = colTop + balancePillH / 2;
+        const chipsRowCY    = colTop + balancePillH + colInnerGap + chipH / 2;
+
+        const rowW    = chipsW + sectionGap + ctrlW + sectionGap + totalBoxW + sectionGap + playW;
+        const rowLeft = (L.sw - rowW) / 2;
+        scene.infoBtn.x = rowLeft - 18 - infoSize / 2;
+        scene.infoBtn.y = panelCY;
+
+        scene.balancePill = makeBalancePill('BALANCE', fmtCash(player.balance), chipsW, balancePillH);
+        scene.balancePill.x = rowLeft + chipsW / 2;
+        scene.balancePill.y = balancePillCY;
+        scene.stage.addChild(scene.balancePill);
+
+        scene.chipBtns = [];
+        let chipX = rowLeft + chipW / 2;
+        for (const v of CHIP_VALUES) {
+          const c = makeChipButton(v);
+          c.x = chipX; c.y = chipsRowCY;
+          scene.stage.addChild(c);
+          scene.chipBtns.push(c);
+          chipX += chipW + chipGap;
+        }
+        const afterChipsX = rowLeft + chipsW + sectionGap;
+
+        const stackTopRowCY    = panelCY - (stackH / 2) + ctrlH / 2;
+        const stackBottomRowCY = panelCY + (stackH / 2) - ctrlH / 2;
+        const stackCX          = afterChipsX + ctrlW / 2;
+        const clearBtn = makeControlButton('Clear Bets', 0xE63946, () => clearAllArrowBets());
+        clearBtn.x = stackCX; clearBtn.y = stackTopRowCY;
+        scene.stage.addChild(clearBtn);
+        scene.ctrlButtons.clear = clearBtn;
+        const repeatBtn = makeControlButton('Repeat Bet', 0xFFD23F, () => repeatLastBets());
+        repeatBtn.x = stackCX; repeatBtn.y = stackBottomRowCY;
+        scene.stage.addChild(repeatBtn);
+        scene.ctrlButtons.repeat = repeatBtn;
+
+        const afterStackX = afterChipsX + ctrlW + sectionGap;
+        const totalCX = afterStackX + totalBoxW / 2;
+        makeTotalBetBox(totalCX, panelCY, totalBoxW, totalBoxH);
+        const afterTotalX = afterStackX + totalBoxW + sectionGap;
+
+        scene.spinBtn = makePlayButton(afterTotalX + playW / 2, panelCY, playW, playH);
+      }
 
       // ── REPEAT BET overlay — appears at the centre of the inner grid
       // after a round resolves (won or lost), prompting the player to
@@ -4104,22 +4285,30 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       const _gridTop  = L.frameY + (L.cellSize + L.cellGap) * 1;
       const _gridW    = GAME.COLS * L.cellSize + (GAME.COLS - 1) * L.cellGap;
       const _gridH    = GAME.ROWS * L.cellSize + (GAME.ROWS - 1) * L.cellGap;
-      const rbW = 200 * gs, rbH = 60 * gs;
+      // Mobile uses absolute pixel sizes (≥44pt thumb-friendly), but
+      // capped at the slot grid width so the button doesn't cover the
+      // left/right arrow rings.
+      // Desktop scales with gameScale so the button fits inside the
+      // grid centre without looking oversized on big monitors.
+      const rbW = L.isMobile ? Math.min(_gridW, 240) : 200 * gs;
+      const rbH = L.isMobile ? 52 : 60 * gs;
+      const rbStrokeW = L.isMobile ? 2 : 2 * gs;
+      const rbCornerR = L.isMobile ? 10 : 10 * gs;
       const rbBtn = new PIXI.Container();
       rbBtn.x = _gridLeft + _gridW / 2;
       rbBtn.y = _gridTop  + _gridH / 2;
       const rbBg = new PIXI.Graphics();
       const drawRb = (hover = false) => {
         rbBg.clear();
-        rbBg.lineStyle(2 * gs, 0x065F46, 1);
+        rbBg.lineStyle(rbStrokeW, 0x065F46, 1);
         rbBg.beginFill(hover ? 0x34D399 : 0x10B981, 1);
-        rbBg.drawRoundedRect(-rbW / 2, -rbH / 2, rbW, rbH, 10 * gs);
+        rbBg.drawRoundedRect(-rbW / 2, -rbH / 2, rbW, rbH, rbCornerR);
         rbBg.endFill();
       };
       drawRb();
       rbBtn.addChild(rbBg);
       const rbLbl = new PIXI.Text('REPEAT BET', {
-        fontFamily: FONT, fontSize: 18 * gs, fontWeight: '800',
+        fontFamily: FONT, fontSize: L.isMobile ? 18 : 18 * gs, fontWeight: '800',
         fill: 0xFFFFFF, letterSpacing: 2,
       });
       rbLbl.anchor.set(0.5);
@@ -4153,67 +4342,51 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       // looks like a glow rather than a panel. The amount text sits
       // on top, large and centred on the same x as REPEAT BET.
       // Visibility is gated by setRoundStatus + win > 0.
-      const winPopupGlowSize = Math.round(420 * gs);
+      // Halo diameter must cover the WIN label, amount, AND REPEAT BET
+      // button stack. Desktop scales with gs (UI proportions track
+      // cellSize); mobile uses an absolute floor so the halo reaches
+      // past the absolute-sized button + text without going wider than
+      // the slot grid.
+      const winPopupGlowSize = L.isMobile
+        ? Math.round(Math.min(_gridW * 1.6, 360))
+        : Math.round(420 * gs);
       // Soft dark radial halo — black-ish at centre fading to fully
       // transparent at the edges. Sits BEHIND both the WIN texts and
       // the REPEAT BET button so it reads like a vignette/aura, not a
       // panel. Sim sandbox lacks canvas.getContext, so a multi-circle
       // PIXI fallback is used there.
       const winPopup = new PIXI.Container();
-      let winPopupGlow = null;
-      try {
-        const _glowCanvas = document.createElement('canvas');
-        if (!_glowCanvas || typeof _glowCanvas.getContext !== 'function') throw 0;
-        _glowCanvas.width  = winPopupGlowSize;
-        _glowCanvas.height = winPopupGlowSize;
-        const _glowCtx = _glowCanvas.getContext('2d');
-        const _glowR = winPopupGlowSize / 2;
-        const _radial = _glowCtx.createRadialGradient(
-          _glowR, _glowR, 0, _glowR, _glowR, _glowR
-        );
-        // Dark slate fades to fully transparent. Stronger than yellow
-        // for "popup" feel; doesn't compete with the yellow WIN amount.
-        // Cranked darker so the popup reads as a real backdrop on the
-        // navy canvas, not just a faint vignette.
-        _radial.addColorStop(0,    'rgba(8, 14, 26, 0.98)');
-        _radial.addColorStop(0.45, 'rgba(8, 14, 26, 0.88)');
-        _radial.addColorStop(0.80, 'rgba(8, 14, 26, 0.45)');
-        _radial.addColorStop(1,    'rgba(8, 14, 26, 0.00)');
-        _glowCtx.fillStyle = _radial;
-        _glowCtx.fillRect(0, 0, winPopupGlowSize, winPopupGlowSize);
-        const winPopupTex = PIXI.Texture.from(_glowCanvas);
-        winPopupGlow = new PIXI.Sprite(winPopupTex);
-        winPopupGlow.anchor.set(0.5);
-      } catch (e) {
-        // Sim fallback — concentric dark circles approximate the radial.
-        const g = new PIXI.Graphics();
-        const steps = 12;
-        for (let i = 0; i < steps; i++) {
-          const t = i / steps;
-          const a = 0.95 * Math.max(0, 1 - t * t);
-          g.beginFill(0x080E1A, a);
-          g.drawCircle(0, 0, (winPopupGlowSize / 2) * (1 - t));
-          g.endFill();
-        }
-        winPopupGlow = g;
-      }
+      const winPopupGlow = makeRadialHalo(winPopupGlowSize);
       winPopupGlow.x = 0; winPopupGlow.y = 0;
       winPopup.addChild(winPopupGlow);
+      // Mobile uses absolute font + offset values so the text doesn't
+      // collide with the absolute-sized REPEAT BET button beneath it.
+      // (On desktop, both the button and this text scale with gs, so
+      // their proportions stay locked.)
+      const winPopupLblFS = L.isMobile ? 14 : 18 * gs;
+      const winPopupAmtFS = L.isMobile ? 36 : 56 * gs;
       const winPopupLbl = new PIXI.Text('WIN', {
-        fontFamily: FONT, fontSize: 18 * gs, fontWeight: '700',
+        fontFamily: FONT, fontSize: winPopupLblFS, fontWeight: '700',
         fill: 0xFFFFFF, letterSpacing: 4,
       });
       winPopupLbl.anchor.set(0.5, 0);
       winPopupLbl.x = 0;
-      winPopupLbl.y = -135 * gs;
+      // Stack: WIN label on top, amount below, then button. On mobile
+      // we anchor offsets to the absolute rbH so the gap above the
+      // button reads clean regardless of how small gs is.
+      winPopupLbl.y = L.isMobile
+        ? -(rbH / 2 + 14 + winPopupAmtFS + winPopupLblFS + 6)
+        : -135 * gs;
       winPopup.addChild(winPopupLbl);
       const winPopupAmt = new PIXI.Text(fmtCash(0), {
-        fontFamily: FONT, fontSize: 56 * gs, fontWeight: '800',
+        fontFamily: FONT, fontSize: winPopupAmtFS, fontWeight: '800',
         fill: 0xFFD23F,
       });
       winPopupAmt.anchor.set(0.5, 0);
       winPopupAmt.x = 0;
-      winPopupAmt.y = -113 * gs;     // sits just below the WIN label
+      winPopupAmt.y = L.isMobile
+        ? -(rbH / 2 + 14 + winPopupAmtFS)
+        : -113 * gs;
       winPopup.addChild(winPopupAmt);
       // Position the popup centred on the GRID CENTRE — same anchor
       // point as the REPEAT BET button. The glow halo sits behind the
@@ -4272,6 +4445,8 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       scene.rtpText.alpha = 0.7;
       scene.rtpText.x = L.sw / 2;
       scene.rtpText.y = L.sh - 18 * gs;
+      // Hide on mobile — would overlap the PLAY button on small canvases.
+      if (L.isMobile) scene.rtpText.visible = false;
       scene.stage.addChild(scene.rtpText);
 
       // Per-mode scene widget hook (BB-style). Currently a no-op for
@@ -5983,6 +6158,21 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
             }, startDelay)
             .to(bill, { alpha: 0, duration: 0.40 }, startDelay + fallDur - 0.20);
         }
+
+        // 2.5) HALO — dark radial vignette behind the CLEAR!/bonus/
+        // TAKE WIN cluster. Same gradient as the end-of-round WIN
+        // popup, sized to cover the text cluster comfortably without
+        // bleeding to the canvas edges. Goes ON TOP of falling
+        // confetti/bills so the central text area dims them slightly
+        // for legibility, but BEHIND the headline/bonus/button so the
+        // text reads on top.
+        const haloD = Math.max(560 * _gs, Math.min(sw, sh) * 0.85);
+        const halo = makeRadialHalo(haloD);
+        halo.x = sw / 2;
+        halo.y = sh / 2 + 35 * _gs;   // midpoint between headline + TAKE WIN
+        halo.alpha = 0;
+        fx.addChild(halo);
+        gsap.to(halo, { alpha: 1, duration: 0.30, ease: 'power2.out' }, 0);
 
         // 3) HEADLINE — big yellow "CLEAR!" — added AFTER confetti so
         // it renders on top of the falling pieces. Holds in place
