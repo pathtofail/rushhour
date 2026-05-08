@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0E1A24" />
-  <title>Rush Hour</title>
+  <title>Traffic Jam</title>
   <style>
     html, body {
       margin: 0; padding: 0; width: 100%; height: 100%;
@@ -83,15 +83,21 @@
     // 8 hues spread ~45° apart on the wheel, all high-saturation, similar
     // lightness so no symbol fades against the cream cell bg. Names kept;
     // rename later if the new colors clash too hard with the words.
+    // 4 cars — each with its own payout multiplier and spawn weight.
+    // Engine pays:  win = stake × arrow_odds × car_payMult × any_boost.
+    // Spawn-weighted average payMult = 0.445, which lets the displayed
+    // arrow odds sit at flat 4× / 5× and still hit ~95% RTP overall.
+    //   Compact: 65% spawn, pays 0.2× — common, near-stake-back
+    //   Sedan:   23% spawn, pays 0.5× — frequent small win
+    //   SUV:      8% spawn, pays 1.0× — meaningful win
+    //   Truck:    4% spawn, pays 3.0× — jackpot car
+    // `basePay` is preserved as an alias for `payMult` so any legacy
+    // call site that reaches for it still gets a sane value.
     const COLORS = [
-      { name: 'Coin',    hex: '#FFD23F', basePay: 0.05, weight: 22 },   // bright yellow
-      { name: 'Rope',    hex: '#FF8C42', basePay: 0.08, weight: 18 },   // vivid orange
-      { name: 'Cloth',   hex: '#3897F0', basePay: 0.10, weight: 15 },   // sky blue
-      { name: 'Bottle',  hex: '#2FD3B5', basePay: 0.15, weight: 12 },   // mint teal
-      { name: 'Powder',  hex: '#6FCF3D', basePay: 0.50, weight: 10 },   // lime green
-      { name: 'Map',     hex: '#E63946', basePay: 0.60, weight:  8 },   // vivid red
-      { name: 'Dagger',  hex: '#8E4FE3', basePay: 0.75, weight:  5 },   // grape purple
-      { name: 'Skull',   hex: '#E84A8A', basePay: 1.50, weight:  3 },   // hot pink
+      { name: 'Compact', hex: '#9FA6B2', payMult: 0.2, basePay: 0.2, weight: 65, vehicleType: 'compact' },
+      { name: 'Sedan',   hex: '#3897F0', payMult: 0.5, basePay: 0.5, weight: 23, vehicleType: 'sedan'   },
+      { name: 'SUV',     hex: '#3DB97D', payMult: 1.0, basePay: 1.0, weight:  8, vehicleType: 'suv'     },
+      { name: 'Truck',   hex: '#E63946', payMult: 3.0, basePay: 3.0, weight:  4, vehicleType: 'truck'   },
     ];
     const COLOR_BY_NAME = Object.fromEntries(COLORS.map(c => [c.name, c]));
 
@@ -141,17 +147,24 @@
       return { color: weightedColor(), wild: false, arrow: rollArrow() };
     }
     // Per-arrow odds (PER-EXIT model): every car that exits through a
-    // staked arrow pays stake × ODDS[N]. Calibrated so betting equally
-    // on every arrow yields 95% RTP, and each individual arrow also
-    // returns 95% (odds_i = 0.95 / E[exits at i]). Mirror pairs share
-    // odds — engine is left-right symmetric.
-    // Re-tune by running `node scripts/sim-arrows.mjs` and pasting the
-    // printed table below.
+    // staked arrow pays stake × ODDS[pos] × car.payMult × any_boost.
+    //
+    // FLAT DESIGN: corner-adjacent arrows show 4×, middle-of-edge
+    // arrows show 5×. Engine pays exactly the displayed value (no
+    // hidden decimals) — the "what you see is what you get" rule for
+    // honest casino display.
+    //
+    // RTP MATH: with the 4-car spawn-weighted average payMult = 0.445
+    // and the simulated exit frequencies (corners ≈ 0.524, middles ≈
+    // 0.434 per round), uniform-stake RTP lands at ~95%. Per-arrow RTP
+    // varies slightly — corners ~93.3%, middles ~96.6% — because flat
+    // displays don't perfectly cancel against the non-uniform exit
+    // frequencies. Accepted trade-off for clean 4× / 5× display.
     const RUSH_ARROW_ODDS = {
-       1: 1.812,  2: 2.203,  3: 2.203,  4: 1.812,
-       5: 1.820,  6: 2.198,  7: 2.195,  8: 1.821,
-       9: 1.818, 10: 2.180, 11: 2.180, 12: 1.818,
-      13: 1.821, 14: 2.195, 15: 2.198, 16: 1.820,
+       1: 4,   2: 5,   3: 5,   4: 4,
+       5: 4,   6: 5,   7: 5,   8: 4,
+       9: 4,  10: 5,  11: 5,  12: 4,
+      13: 4,  14: 5,  15: 5,  16: 4,
     };
     const RUSH_DEFAULT_ARROW_ODDS = 2.0;
     function arrowOddsFor(pos) {
@@ -162,6 +175,182 @@
       let total = 0;
       for (const k in bets) total += bets[k] || 0;
       return total;
+    }
+    // ── Traffic-officer boosts ──────────────────────────────────────
+    // 4 officers — one at each conveyor corner. On round start each
+    // officer rolls whether to fire; if it fires it picks a random
+    // multiplier (weighted) and a random arrow from one of its two
+    // adjacent edges, then "sends" the multiplier to that arrow.
+    // The arrow's payout for that round is multiplied by the boost
+    // (a stake on a 2.2× arrow with a ×10 boost pays 22× the stake
+    // per car that exits there).
+    const OFFICER_MULT_VALUES  = [2, 4, 10, 25, 50, 100, 500, 1000];
+    const OFFICER_MULT_WEIGHTS = [50, 25, 12,  6,  3,  1.5, 0.3, 0.1];
+    const OFFICER_FIRE_CHANCE  = 0.35;   // per officer per round
+    function rollOfficerMultiplier() {
+      let total = 0;
+      for (const w of OFFICER_MULT_WEIGHTS) total += w;
+      let r = Math.random() * total;
+      for (let i = 0; i < OFFICER_MULT_VALUES.length; i++) {
+        r -= OFFICER_MULT_WEIGHTS[i];
+        if (r <= 0) return OFFICER_MULT_VALUES[i];
+      }
+      return OFFICER_MULT_VALUES[0];
+    }
+    // For each corner (0=TL, 1=TR, 2=BR, 3=BL), the two edges it can
+    // target. Returns a single ringPos picked at random.
+    function pickOfficerTargetArrow(cornerIdx) {
+      const C = GAME.COLS, R = GAME.ROWS;
+      // top edge:    1..C
+      // right edge:  C+1..C+R
+      // bottom edge: C+R+1..2C+R
+      // left edge:   2C+R+1..2(C+R)
+      const edgeRanges = [
+        [[1, C],         [2 * C + R + 1, 2 * (C + R)]],   // TL: top + left
+        [[1, C],         [C + 1,         C + R]],         // TR: top + right
+        [[C + R + 1, 2 * C + R], [C + 1, C + R]],         // BR: bottom + right
+        [[C + R + 1, 2 * C + R], [2 * C + R + 1, 2 * (C + R)]], // BL: bottom + left
+      ];
+      const ranges = edgeRanges[cornerIdx];
+      const edge = ranges[Math.random() < 0.5 ? 0 : 1];
+      return edge[0] + Math.floor(Math.random() * (edge[1] - edge[0] + 1));
+    }
+    // Roll the round's boosts. Returns an array of fired officers + a
+    // boosts map keyed by ringPos → multiplier value.
+    function rollOfficerBoosts() {
+      const fired = [];
+      const boosts = {};
+      for (let corner = 0; corner < 4; corner++) {
+        if (Math.random() >= OFFICER_FIRE_CHANCE) continue;
+        const mult = rollOfficerMultiplier();
+        let pos = pickOfficerTargetArrow(corner);
+        // If a previous officer already targeted this arrow, multiply
+        // the boosts together (rare but coherent).
+        boosts[pos] = (boosts[pos] || 1) * mult;
+        fired.push({ corner, multiplier: mult, ringPos: pos });
+      }
+      return { boosts, fired };
+    }
+    // ── Officer scene widget (module-scope, mode-agnostic) ──
+    // Called from HOOKS_OFFICER.buildSceneFeatureWidget. Builds 4
+    // officer sprites at the conveyor corners and stashes them on
+    // scene.officers so the spin animator can fly multiplier badges
+    // from them. Reads frame + L from the ctx object so it doesn't
+    // close over buildScene's locals.
+    function buildOfficerWidgets(scene, _app, ctx) {
+      const L = ctx && ctx.L;
+      const frame = (ctx && ctx.frame) || scene.frameContainer;
+      if (!L || !frame) return;
+      const officerCornerVis = [
+        { visR: 0,             visC: 0,             corner: 0 }, // TL
+        { visR: 0,             visC: GAME.COLS + 1, corner: 1 }, // TR
+        { visR: GAME.ROWS + 1, visC: GAME.COLS + 1, corner: 2 }, // BR
+        { visR: GAME.ROWS + 1, visC: 0,             corner: 3 }, // BL
+      ];
+      const visToXY = (visR, visC) => ({
+        x: L.frameX + (L.cellSize + L.cellGap) * visC + L.cellSize / 2,
+        y: L.frameY + (L.cellSize + L.cellGap) * visR + L.cellSize / 2,
+      });
+      const makeOfficerSprite = () => {
+        const cont = new PIXI.Container();
+        const s = L.cellSize / 90;
+        const body = new PIXI.Graphics();
+        body.lineStyle(1.5 * s, 0x000000, 0.9);
+        body.beginFill(0x14213D, 1);
+        body.drawRoundedRect(-18 * s, 8 * s, 36 * s, 24 * s, 4 * s);
+        body.endFill();
+        cont.addChild(body);
+        const btnLine = new PIXI.Graphics();
+        btnLine.beginFill(0xFFD23F, 1);
+        btnLine.drawRect(-1.5 * s, 10 * s, 3 * s, 14 * s);
+        btnLine.endFill();
+        btnLine.drawCircle(0, 13 * s, 1.6 * s);
+        btnLine.drawCircle(0, 21 * s, 1.6 * s);
+        cont.addChild(btnLine);
+        const eps = new PIXI.Graphics();
+        eps.beginFill(0xFFD23F, 0.95);
+        eps.drawRoundedRect(-19 * s, 8 * s, 5 * s, 4 * s, 1 * s);
+        eps.drawRoundedRect( 14 * s, 8 * s, 5 * s, 4 * s, 1 * s);
+        eps.endFill();
+        cont.addChild(eps);
+        const face = new PIXI.Graphics();
+        face.lineStyle(1 * s, 0x6E4A2A, 0.7);
+        face.beginFill(0xF2C29A, 1);
+        face.drawRoundedRect(-13 * s, -14 * s, 26 * s, 22 * s, 7 * s);
+        face.endFill();
+        cont.addChild(face);
+        const shades = new PIXI.Graphics();
+        shades.beginFill(0x000000, 1);
+        shades.drawRoundedRect(-13 * s, -7 * s, 26 * s, 6 * s, 2 * s);
+        shades.endFill();
+        shades.beginFill(0x1A1A1A, 1);
+        shades.drawRect(-1 * s, -6 * s, 2 * s, 4 * s);
+        shades.endFill();
+        shades.beginFill(0xFFFFFF, 0.35);
+        shades.drawCircle(-7 * s, -4.5 * s, 1.5 * s);
+        shades.drawCircle( 7 * s, -4.5 * s, 1.5 * s);
+        shades.endFill();
+        cont.addChild(shades);
+        const stash = new PIXI.Graphics();
+        stash.lineStyle(1 * s, 0x1A0F08, 1);
+        stash.beginFill(0x3A2818, 1);
+        stash.moveTo(-9 * s, 1 * s);
+        stash.lineTo(-1 * s, 0 * s);
+        stash.lineTo(-1 * s, 3 * s);
+        stash.lineTo(-9 * s, 4 * s);
+        stash.lineTo(-9 * s, 1 * s);
+        stash.moveTo( 9 * s, 1 * s);
+        stash.lineTo( 1 * s, 0 * s);
+        stash.lineTo( 1 * s, 3 * s);
+        stash.lineTo( 9 * s, 4 * s);
+        stash.lineTo( 9 * s, 1 * s);
+        stash.endFill();
+        cont.addChild(stash);
+        const visor = new PIXI.Graphics();
+        visor.lineStyle(1 * s, 0x000000, 1);
+        visor.beginFill(0x0A0A14, 1);
+        visor.drawRoundedRect(-17 * s, -17 * s, 34 * s, 5 * s, 2 * s);
+        visor.endFill();
+        cont.addChild(visor);
+        const cap = new PIXI.Graphics();
+        cap.lineStyle(1.5 * s, 0x000000, 0.9);
+        cap.beginFill(0x14213D, 1);
+        cap.moveTo(-13 * s, -30 * s);
+        cap.lineTo( 13 * s, -30 * s);
+        cap.lineTo( 15 * s, -17 * s);
+        cap.lineTo(-15 * s, -17 * s);
+        cap.lineTo(-13 * s, -30 * s);
+        cap.endFill();
+        cont.addChild(cap);
+        const badge = new PIXI.Graphics();
+        badge.lineStyle(0.7 * s, 0x4A3208, 1);
+        badge.beginFill(0xFFD23F, 1);
+        const spikes = 5;
+        const rOut = 4 * s, rIn = 1.6 * s;
+        const cy = -23 * s;
+        for (let i = 0; i < spikes * 2; i++) {
+          const r = i % 2 === 0 ? rOut : rIn;
+          const a = (i / (spikes * 2)) * Math.PI * 2 - Math.PI / 2;
+          const px = Math.cos(a) * r;
+          const py = Math.sin(a) * r + cy;
+          if (i === 0) badge.moveTo(px, py); else badge.lineTo(px, py);
+        }
+        badge.lineTo(Math.cos(-Math.PI / 2) * rOut, Math.sin(-Math.PI / 2) * rOut + cy);
+        badge.endFill();
+        cont.addChild(badge);
+        return cont;
+      };
+      scene.officers = [];
+      for (const oc of officerCornerVis) {
+        const ctr = visToXY(oc.visR, oc.visC);
+        const sprite = makeOfficerSprite();
+        sprite.x = ctr.x;
+        sprite.y = ctr.y;
+        sprite._cornerIdx = oc.corner;
+        sprite._cornerCenter = { x: ctr.x, y: ctr.y };
+        frame.addChild(sprite);
+        scene.officers.push(sprite);
+      }
     }
     function spawnAnyCell() { return spawnRushSymbol(); }
     function generateGrid() {
@@ -215,7 +404,7 @@
       // ── Mode override: Rush Hour ──────────────────────────────────────
       // The arrow puzzle bypasses the entire cluster-pay cascade body.
       // Returns total payout from symbol exits; emits its own events.
-      if (mode.runCustomCascade && MODE === 'rush') {
+      if (mode.runCustomCascade) {
         const { totalPayout: rushPay } = runRushSpin(grid, state.conveyor, events, bet);
         const finalWin = rushPay;
         events.push({
@@ -308,6 +497,15 @@
       maybeSpawnToken()      { return null; },
       shiftConveyor()        { return []; },
       buildSceneFeatureWidget(_scene, _app, _ctx) {},
+      // Per-round bonus mechanic. Default = no boosts (clean engine
+      // doesn't know about officers). Officer / Ante / Super-Ante
+      // variants override this hook to roll multipliers.
+      // Returns { boosts: { ringPos → multiplier }, fired: [{...}] }.
+      rollRoundBoosts(_bet) { return { boosts: {}, fired: [] }; },
+      // Per-stake fee charged on top of the wager. Default 0 (no fee).
+      // Ante variants override to charge a Lightning-Blackjack-style
+      // surcharge that funds the multiplier feature.
+      computeFee(_stake) { return 0; },
     };
 
     // ── Mode: Rush Hour (puzzle) ────────────────────────────────────────
@@ -414,64 +612,162 @@
       return { totalPayout, cascadeCount: 1 };
     }
 
-    const HOOKS_RUSH = {
+    // Hooks shared by every Rush variant — same grid, same conveyor
+    // skeleton, same custom cascade. The variants differ only in the
+    // round-start bonus mechanic + per-mode UI widgets.
+    const HOOKS_RUSH_SHARED = {
       ...MODE_HOOKS_DEFAULT,
       _modeGameDims:   RUSH_GAME,
       _modeRingSize:   RUSH_RING_SIZE,
       _modeFinishPos:  RUSH_FINISH_POS,
-      // Decorative conveyor only — no tokens spawn yet.
       ringCellsForSlot()     { return []; },
       shiftConveyor(_)       { return []; },
       maybeSpawnToken(_, __) { return null; },
       runCustomCascade: true,
     };
-    const RULES_RUSH =
-`The Grid
-• 5×5 grid wrapped by the same 4-sided conveyor as All Around.
 
-The Puzzle
-• Every car carries a cardinal arrow: ↑ ↓ ← →.
-• On each tick, a random movable car moves one cell in its arrow
-  direction.
-• A car moves if the next cell is empty, or if the arrow points off
-  the edge of the grid (the car EXITS).
+    // ── Mode: Base Rush ──
+    // The clean engine. 16 ring arrows, per-exit pay, no officers,
+    // no fees, no boosts. The displayed arrow odds (1.8–2.2x) are
+    // already calibrated to 95% RTP under this mode.
+    const HOOKS_BASE = {
+      ...HOOKS_RUSH_SHARED,
+      // rollRoundBoosts inherits the default no-op from
+      // MODE_HOOKS_DEFAULT — empty boosts every round.
+    };
 
-Pay Edge
-• Only cars that exit through the RIGHT edge of the grid pay
-  (paytable value × bet). Other-side exits clear the cell but pay 0.
-
-Cascades
-• When no symbol can move, the grid refills with gravity: surviving
-  cars fall to the bottom of their column; new cars (random colour +
-  random arrow) drop in from above. The fall can unlock gridlocks
-  by repositioning stuck cars closer to an edge.
-• The next movement pass begins. Cascades continue until a movement
-  pass produces zero moves.
-
-Win = total paytable value × bet of every symbol that exited.`;
-
-    // Single mode for now — kept as a one-entry MODE_DEF so existing
-    // code that reaches for getModeDef() still works.
-    const MODE = 'rush';
-
-    const MODE_DEF = {
-      rush: {
-        ...HOOKS_RUSH,
-        key: 'rush',
-        name: 'Rush Hour',
-        displayOrder: 1,
-        description: [
-          '5×5 grid wrapped by a 4-sided conveyor.',
-          '',
-          'Every car carries a cardinal arrow. Cars move one at a',
-          'time toward their arrow; a car that walks off the edge',
-          'EXITS the grid. Right-edge exits pay paytable value × bet.',
-        ],
-        getRulesText: () => RULES_RUSH,
+    // ── Mode: Officer (Lightning) ──
+    // Adds 4 traffic-officer fixtures at the conveyor corners. On
+    // round start each officer rolls fire chance × multiplier × target
+    // arrow. Boosted arrows pay stake × baseOdds × multiplier per car
+    // that exits. The officer feature is plugged in via
+    //   • rollRoundBoosts → returns the per-round boost map
+    //   • buildSceneFeatureWidget → adds the officer sprites to scene
+    const HOOKS_OFFICER = {
+      ...HOOKS_RUSH_SHARED,
+      rollRoundBoosts(_bet) { return rollOfficerBoosts(); },
+      buildSceneFeatureWidget(scene, app, ctx) {
+        if (typeof buildOfficerWidgets === 'function') {
+          buildOfficerWidgets(scene, app, ctx);
+        }
       },
     };
-    function getModeDef() { return MODE_DEF[MODE]; }
-    function setMode(_) { /* single-mode build — switching disabled */ }
+    const RULES_BASE =
+`How to play
+
+Place your bets
+• 16 arrows surround the grid — one for each direction
+  out of every edge cell.
+• Tap any arrow to drop a chip on it. You can bet on as
+  many arrows as you want.
+• Corner arrows pay 4×, middle arrows pay 5×.
+
+What happens when you press PLAY
+• Every car on the grid carries an arrow. Cars move one at
+  a time in the direction of their arrow. A car at the edge
+  with an outward arrow leaves through the matching slot.
+• When a car leaves through an arrow you bet on, you win:
+      your bet × the arrow's pay × the car's pay
+• Multiple cars can leave through the same arrow in one
+  round. Each one pays you separately.
+
+Cars
+• Four car types, each pays a different amount:
+    • Compact (grey)  — pays 0.2×
+    • Sedan (blue)    — pays 0.5×
+    • SUV (green)     — pays 1×
+    • Truck (red)     — pays 3× (the jackpot car)
+• Trucks are rare. When one leaves through your arrow,
+  it pays up to 15× your bet.
+
+That's it. Drop chips, press PLAY, watch the traffic.`;
+
+    const RULES_OFFICER =
+`How to play
+
+Place your bets
+• 16 arrows surround the grid. Tap any arrow to drop a
+  chip on it. You can bet on as many arrows as you want.
+• Corner arrows pay 4×, middle arrows pay 5×.
+
+What happens when you press PLAY
+• Cars move one at a time in the direction of their arrow.
+  When one leaves through an arrow you bet on, you win:
+      your bet × arrow pay × car pay × any officer bonus
+
+Cars
+• Four car types: Compact (pays 0.2×), Sedan (0.5×),
+  SUV (1×), Truck (3×, the jackpot car). The car's pay
+  multiplies your win on every leaving car.
+
+The traffic officers
+• Four officers stand at the outer corners. Some rounds
+  one or more will drop a bonus multiplier (2× through
+  1000×) onto a random arrow before any car moves.
+• Boosted arrows show a brighter number. The bonus only
+  lasts for that round.
+
+That's it. Drop chips, press PLAY, watch the traffic.`;
+
+    // Feature flag — traffic-light cones + lightpost fixtures are
+    // parked while we figure out a final design. Flip this to true
+    // to re-enable the per-cell lighting system (cones, fixture dots,
+    // roundabouts, per-tick state machine).
+    const TRAFFIC_LIGHTS_ENABLED = false;
+
+    // Read persisted mode at load. Page reloads on switch (same
+    // pattern as TrailCatcher) so closure-scoped constants get
+    // re-evaluated against the new mode without partial-state risk.
+    const MODE_KEY = 'rush_hour_mode';
+    let MODE = 'base';
+    try {
+      const saved = localStorage.getItem(MODE_KEY);
+      if (saved === 'base' || saved === 'officer') MODE = saved;
+    } catch (_) {}
+
+    const MODE_DEF = {
+      base: {
+        ...HOOKS_BASE,
+        key: 'base',
+        name: 'Traffic Jam',
+        displayOrder: 1,
+        description: [
+          'Bet on the arrows around the grid. Each arrow points',
+          'one way out of the city block.',
+          '',
+          'Press PLAY and the cars start driving in the direction',
+          'of their arrow. When a car leaves the grid through an',
+          'arrow you bet on, you win.',
+          '',
+          'Bigger cars pay more — keep an eye out for the truck.',
+        ],
+        getRulesText: () => RULES_BASE,
+      },
+      officer: {
+        ...HOOKS_OFFICER,
+        key: 'officer',
+        name: 'Traffic Jam Bonus',
+        displayOrder: 2,
+        description: [
+          'Bet on the arrows around the grid. Each arrow points',
+          'one way out of the city block.',
+          '',
+          'Press PLAY and the cars drive away. When a car leaves',
+          'through an arrow you bet on, you win.',
+          '',
+          'Some rounds, the traffic officers at the corners drop',
+          'a bonus multiplier on a random arrow. If a car leaves',
+          'there, your win is multiplied by the bonus.',
+        ],
+        getRulesText: () => RULES_OFFICER,
+      },
+    };
+    function getModeDef() { return MODE_DEF[MODE] || MODE_DEF.base; }
+    function setMode(m) {
+      if (!MODE_DEF[m]) return;
+      MODE = m;
+      try { localStorage.setItem(MODE_KEY, m); } catch (_) {}
+    }
 
     // Apply mode-specific topology to top-level GAME / RING_SIZE /
     // FINISH_POS. Engine code reads from these top-level values, so this
@@ -550,7 +846,7 @@ Win = total paytable value × bet of every symbol that exited.`;
 
     const app = new PIXI.Application({
       resizeTo: window,
-      backgroundColor: 0x0E1424,   // deep midnight navy — symbols pop on dark
+      backgroundColor: 0x1A2332,   // 60% — deep slate-blue: cool, low-sat, mid-dark. Recedes per Itten warm/cool; lets the warm CTA advance.
       antialias: true,
       autoDensity: true,
       resolution: window.devicePixelRatio || 1,
@@ -609,6 +905,10 @@ Win = total paytable value × bet of every symbol that exited.`;
     // status text near the spin button.
     let roundStatus = 'idle';
     const fmtCash = n => `$${n.toFixed(2)}`;
+    // WIN headline uses a "WIN <amount>" prefix so the number is
+    // self-labelling. Two-space separator gives the prefix breathing
+    // room without an em-dash or pill.
+    const fmtWin  = n => `WIN  ${fmtCash(n)}`;
     // Compact format for cramped UI surfaces (token chips, etc.):
     // drops decimals when whole, uses K/M suffixes for large values.
     const fmtCashCompact = n => {
@@ -922,7 +1222,7 @@ Win = total paytable value × bet of every symbol that exited.`;
     // frame never fills the canvas edge-to-edge. FILL_RATIO leaves explicit
     // breathing room; MAX_CELL caps the upper bound on huge monitors.
     const DESIGN_CELL_REF = 96;     // canonical cell size used to derive gameScale
-    const GAP_RATIO = 8 / 96;       // cellGap / cellSize ratio from the design
+    const GAP_RATIO = 16 / 96;      // wider gap so lane markings sit IN the road, not on cell edges
     const TITLE_RATIO = 110 / 96;   // top reserve / cellSize. Holds the
                                      //  GAME MODE caption + mode-button row
                                      //  at the top of the canvas.
@@ -947,19 +1247,29 @@ Win = total paytable value × bet of every symbol that exited.`;
       //   └──────────────────────────────┴─────────┘
       // The right column is a fixed-width vertical bet panel; the grid
       // sizes itself to fit the remaining left area.
-      const isAllAround = MODE === 'allAround' || MODE === 'rush';
+      const isAllAround = MODE === 'allAround' || MODE === 'rush' || MODE === 'base' || MODE === 'officer';
       const isActivator = MODE === 'activator';
       const FRAME_W_CELLS = GAME.COLS + (isAllAround ? 2 : (isActivator ? 0 : 1));
       const FRAME_H_CELLS = GAME.ROWS + (isAllAround ? 2 : 1);
-      const sidePanelW   = Math.min(340, Math.max(260, sw * 0.26));
-      const sidePanelPad = 18;
-      const topBarH      = 44;          // slim top bar — info + balance only
-      const winBandH     = 90;          // big WIN headline + status subtitle
-      const bottomPad    = 24;
+      // Layout bands (top→bottom):
+      //   topBarH       slim, info + balance pill
+      //   winBandH      big WIN headline + status subtitle
+      //   (grid)
+      //   bottomPanelH  chips + total + CLEAR + REPEAT + PLAY
+      //   bottomPad
+      // Top band fits: mode-button caption + button row (top half) +
+      // BALANCE pill (bottom half). 90px gives each layer ~45px.
+      const topBarH      = 90;
+      // winBandH must fit: WIN headline (~48px) + inner gap (~6px) +
+      // status text (~14px) + HUD breathing room (~24px) = ~92px.
+      // 100 leaves a small slack for descenders / line-height padding.
+      const winBandH     = 100;
+      const bottomPanelH = 96;
+      const bottomPad    = 14;
       const horizK = FRAME_W_CELLS + (FRAME_W_CELLS - 1) * GAP_RATIO;
       const vertK  = FRAME_H_CELLS + (FRAME_H_CELLS - 1) * GAP_RATIO;
-      const availW = sw - sidePanelW - sidePanelPad - 2 * FRAME_HPAD;
-      const availH = sh - topBarH - winBandH - bottomPad;
+      const availW = sw - 2 * FRAME_HPAD;
+      const availH = sh - topBarH - winBandH - bottomPanelH - bottomPad;
       const cellH  = availW / horizK;
       const cellV  = availH / vertK;
       let cellSize = Math.min(cellH, cellV) * FILL_RATIO;
@@ -969,16 +1279,14 @@ Win = total paytable value × bet of every symbol that exited.`;
       const gameScale = cellSize / DESIGN_CELL_REF;
       const frameSize = cellSize * FRAME_W_CELLS + cellGap * (FRAME_W_CELLS - 1);
       const frameH    = cellSize * FRAME_H_CELLS + cellGap * (FRAME_H_CELLS - 1);
-      const sidePanelX = 0;
-      const rightAreaLeft = sidePanelW + sidePanelPad;
-      const rightAreaW    = sw - rightAreaLeft;
-      const frameX = rightAreaLeft + Math.max(FRAME_HPAD, (rightAreaW - frameSize) / 2);
-      // Frame sits BELOW the top bar AND the WIN headline band.
+      // Grid is centred horizontally; bottom panel + WIN band + top bar
+      // each take their own horizontal slice.
+      const frameX = Math.max(FRAME_HPAD, (sw - frameSize) / 2);
       const frameY = topBarH + winBandH + Math.max(8, (availH - frameH) / 2);
       _layoutCache = {
         sw, sh, gameScale, cellSize, cellGap,
         frameSize, frameH, frameX, frameY,
-        sidePanelX, sidePanelW, topBarH, winBandH,
+        topBarH, winBandH, bottomPanelH, bottomPad,
         titleH: topBarH, hudReserve: 0,
       };
       return _layoutCache;
@@ -1008,7 +1316,7 @@ Win = total paytable value × bet of every symbol that exited.`;
     // row 1 (one conveyor row above). For All Around the slot is inset
     // by one on every side: col 1..COLS, row 1..ROWS.
     function slotCellCenter(r, c) {
-      const isAllAround = MODE === 'allAround' || MODE === 'rush';
+      const isAllAround = MODE === 'allAround' || MODE === 'rush' || MODE === 'base' || MODE === 'officer';
       const visR = r + 1;
       const visC = c + (isAllAround ? 1 : 0);
       return {
@@ -1022,7 +1330,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         x: L.frameX + (L.cellSize + L.cellGap) * visC + L.cellSize / 2,
         y: L.frameY + (L.cellSize + L.cellGap) * visR + L.cellSize / 2,
       });
-      if (MODE === 'allAround' || MODE === 'rush') {
+      if (MODE === 'allAround' || MODE === 'rush' || MODE === 'base' || MODE === 'officer') {
         // 4-sided conveyor wrapping a (R)×(C) slot inside an (R+2)×(C+2)
         // frame. Slot occupies visR=1..R, visC=1..C. Conveyor occupies
         // the surrounding ring of cells.
@@ -1255,18 +1563,14 @@ Win = total paytable value × bet of every symbol that exited.`;
       return cont;
     }
 
-    // Vehicle type assigned by symbol — low payout = small car,
-    // high payout = lorry. Order ranks by basePay (Coin lowest, Skull
-    // highest in COLORS).
+    // Vehicle type per car. Mirrors the COLORS array's vehicleType
+    // field; kept here for the makeVehicleGlyph lookup which predates
+    // the field move.
     const VEHICLE_BY_COLOR = {
-      Coin:   'hatchback',
-      Rope:   'compact',
-      Cloth:  'sedan',
-      Bottle: 'coupe',
-      Powder: 'suv',
-      Map:    'van',
-      Dagger: 'truck',
-      Skull:  'lorry',
+      Compact: 'compact',
+      Sedan:   'sedan',
+      SUV:     'suv',
+      Truck:   'truck',
     };
 
     // Top-down vehicle pointing UP, then rotated to match the arrow.
@@ -1275,6 +1579,12 @@ Win = total paytable value × bet of every symbol that exited.`;
       const type = VEHICLE_BY_COLOR[colorName] || 'compact';
       const cont = new PIXI.Container();
       cont._vehicleType = type;
+
+      // Uniform footprint for every vehicle — variety comes from body
+      // shape detail (cab+cargo for trucks, windshield/rear window for
+      // cars), not silhouette size. Keeps the grid visually balanced.
+      const VEH_W = cellSize * 0.50;
+      const VEH_H = cellSize * 0.78;
 
       const drawWheelRect = (x, y, w, h) => {
         const g = new PIXI.Graphics();
@@ -1287,8 +1597,8 @@ Win = total paytable value × bet of every symbol that exited.`;
 
       if (type === 'truck' || type === 'lorry') {
         // Cab (front, coloured) + cargo box (back, neutral grey).
-        const w = cellSize * (type === 'lorry' ? 0.56 : 0.50);
-        const h = cellSize * (type === 'lorry' ? 0.92 : 0.82);
+        const w = VEH_W;
+        const h = VEH_H;
         const cabH   = h * (type === 'lorry' ? 0.30 : 0.38);
         const gap    = h * 0.02;
         const cargoH = h - cabH - gap;
@@ -1349,17 +1659,11 @@ Win = total paytable value × bet of every symbol that exited.`;
         tails.endFill();
         cont.addChild(tails);
       } else {
-        // Car family — progressively larger by tier.
-        const dims = {
-          hatchback: { w: 0.40, h: 0.58 },
-          compact:   { w: 0.44, h: 0.68 },
-          sedan:     { w: 0.48, h: 0.78 },
-          coupe:     { w: 0.46, h: 0.82 },
-          suv:       { w: 0.54, h: 0.80 },
-          van:       { w: 0.56, h: 0.88 },
-        }[type] || { w: 0.50, h: 0.78 };
-        const w = cellSize * dims.w;
-        const h = cellSize * dims.h;
+        // Car family — uniform footprint across all tiers (hatchback
+        // through van). Body shape stays the same; tier identity is
+        // carried by colour, not size.
+        const w = VEH_W;
+        const h = VEH_H;
         // Body
         const body = new PIXI.Graphics();
         body.lineStyle(2, 0x1B1F26, 1);
@@ -1983,69 +2287,154 @@ Win = total paytable value × bet of every symbol that exited.`;
       const contentTop = tabBarY + tabH / 2 + 18 * scale;
       const contentBot = panelY + panelH - 24 * scale;
 
-      // Paytable content: 8 symbols, sorted highest pay → lowest. Each
-      // row reads "<swatch>  +$X.XX" where the cash amount is the per-
-      // cell pay at the current bet. Top tier rows get a brighter border
-      // so the "biggest pays" are visually emphasized (BB pattern).
+      // Paytable content — Rush Hour pay model.
+      //
+      // Win = stake × arrow odds × officer multiplier (when boosted),
+      // per CAR THAT EXITS through that arrow. The car's colour and
+      // shape is purely cosmetic — every car pays the same way. We
+      // show three sections: arrow odds, officer multipliers, and a
+      // row of car graphics so the player sees the variety + the
+      // "all the same" message together.
       const paytableContent = new PIXI.Container();
       modal.addChild(paytableContent);
-      const COLORS = [...window.RushHour.COLORS].sort((a, b) => b.basePay - a.basePay);
-      const rowGap = 6 * scale;
-      const rowW = panelW - 48 * scale;
-      const rowX = panelX + 24 * scale;
-      const padL = 12 * scale;
-      const padR = 24 * scale;
-      const swReserve = 0.16 * rowW;
-      const swColCx   = rowX + padL + swReserve / 2;
+      const padX = 32 * scale;
+      const colW = panelW - padX * 2;
+      const leftX = panelX + padX;
 
-      // Subtitle telling the player what the values mean + current bet.
-      const subtitle = new PIXI.Text(
-        `Cash paid per cluster cell  (bet ${fmtCash(player.bet)})`,
-        { fontFamily: FONT, fontSize: 13 * scale, fill: 0xD4A017, letterSpacing: 1 }
-      );
-      subtitle.anchor.set(0.5, 0.5);
-      subtitle.x = panelX + panelW / 2;
-      subtitle.y = contentTop + 12 * scale;
-      paytableContent.addChild(subtitle);
-
-      // Rows.
-      const rowsTop = contentTop + 32 * scale;
-      const rowH = (contentBot - rowsTop - rowGap * (COLORS.length - 1)) / COLORS.length;
-      for (let i = 0; i < COLORS.length; i++) {
-        const col = COLORS[i];
-        const isTop = i < 2;   // top 2 paying symbols get tier emphasis
-        const ry = rowsTop + i * (rowH + rowGap);
-        const card = new PIXI.Graphics();
-        card.lineStyle(isTop ? 2.5 * scale : 1.5 * scale,
-                       isTop ? 0xFFD54F : 0xC9A24A, isTop ? 1 : 0.85);
-        card.beginFill(0x0E1424, 0.95);
-        card.drawRoundedRect(rowX, ry, rowW, rowH, rowH * 0.32);
-        card.endFill();
-        paytableContent.addChild(card);
-
-        // Color swatch.
-        const sw2 = Math.min(rowH * 0.7, swReserve * 0.85);
-        const swCenterY = ry + rowH / 2;
-        const swatch = new PIXI.Graphics();
-        swatch.lineStyle(2 * scale, 0x0E1424, 0.95);
-        swatch.beginFill(colorToUint(col.hex), 1);
-        swatch.drawRoundedRect(
-          swColCx - sw2 / 2, swCenterY - sw2 / 2, sw2, sw2, sw2 * 0.25
-        );
-        swatch.endFill();
-        paytableContent.addChild(swatch);
-
-        // Cash value at current bet — top tiers get a brighter gold.
-        const cash = col.basePay * player.bet;
-        const val = new PIXI.Text(`+${fmtCash(cash)}`, {
-          fontFamily: FONT, fontSize: Math.min(24 * scale, rowH * 0.65),
-          fill: isTop ? 0xFFD54F : 0xFFECB3, fontWeight: 'bold',
+      const sectionTitle = (text, y) => {
+        const t = new PIXI.Text(text, {
+          fontFamily: FONT, fontSize: 13 * scale, fill: 0xFFD23F,
+          letterSpacing: 2, fontWeight: '800',
         });
-        val.anchor.set(1, 0.5);
-        val.x = rowX + rowW - padR;
-        val.y = swCenterY;
-        paytableContent.addChild(val);
+        t.x = leftX; t.y = y;
+        paytableContent.addChild(t);
+      };
+      const bodyText = (text, y, opts = {}) => {
+        const t = new PIXI.Text(text, {
+          fontFamily: FONT, fontSize: (opts.size || 13) * scale,
+          fill: opts.fill ?? 0xE8DDC4, fontWeight: opts.weight || '500',
+        });
+        t.x = leftX + (opts.indent || 0); t.y = y;
+        paytableContent.addChild(t);
+      };
+
+      let cy = contentTop;
+
+      // ── Arrow odds ──
+      sectionTitle('ARROW ODDS', cy);
+      cy += 22 * scale;
+      bodyText('Each ring arrow has a multiplier shown on it.', cy);
+      cy += 18 * scale;
+      bodyText('You win bet × that arrow\'s pay × car\'s pay, per car.', cy);
+      cy += 26 * scale;
+      const oddsRow = (label, value, atY) => {
+        const lt = new PIXI.Text(label, {
+          fontFamily: FONT, fontSize: 14 * scale, fill: 0xFFFFFF, fontWeight: '600',
+        });
+        lt.x = leftX + 8 * scale; lt.y = atY;
+        paytableContent.addChild(lt);
+        const vt = new PIXI.Text(value, {
+          fontFamily: FONT, fontSize: 18 * scale, fill: 0xFFD23F, fontWeight: '800',
+        });
+        vt.anchor.set(1, 0);
+        vt.x = leftX + colW;
+        vt.y = atY - 2 * scale;
+        paytableContent.addChild(vt);
+      };
+      oddsRow('Corner-adjacent arrows', '4×', cy);
+      cy += 22 * scale;
+      oddsRow('Middle-of-edge arrows', '5×', cy);
+      cy += 32 * scale;
+
+      // ── Officer multipliers — only shown in modes that use officers.
+      if (MODE === 'officer') {
+        sectionTitle('TRAFFIC OFFICER MULTIPLIERS', cy);
+        cy += 22 * scale;
+        bodyText('Some rounds, an officer will throw a multiplier onto', cy);
+        cy += 18 * scale;
+        bodyText('a random arrow. A car exiting there pays × the bonus.', cy);
+        cy += 24 * scale;
+        const officers = [
+          { mult: '2x',    rarity: 'common' },
+          { mult: '4x',    rarity: 'common' },
+          { mult: '10x',   rarity: 'less common' },
+          { mult: '25x',   rarity: 'uncommon' },
+          { mult: '50x',   rarity: 'rare' },
+          { mult: '100x',  rarity: 'very rare' },
+          { mult: '500x',  rarity: 'extremely rare' },
+          { mult: '1000x', rarity: 'jackpot' },
+        ];
+        const offRowH = 18 * scale;
+        const offColCount = 2;
+        const offColInterW = colW / offColCount;
+        for (let i = 0; i < officers.length; i++) {
+          const off = officers[i];
+          const cIdx = i % offColCount;
+          const rIdx = Math.floor(i / offColCount);
+          const ox = leftX + cIdx * offColInterW + 8 * scale;
+          const oy = cy + rIdx * offRowH;
+          const m = new PIXI.Text(off.mult, {
+            fontFamily: FONT, fontSize: 14 * scale, fill: 0xFFD23F, fontWeight: '800',
+          });
+          m.x = ox; m.y = oy;
+          paytableContent.addChild(m);
+          const r = new PIXI.Text(off.rarity, {
+            fontFamily: FONT, fontSize: 11 * scale, fill: 0xA8AEB6, fontWeight: '500',
+          });
+          r.x = ox + 56 * scale;
+          r.y = oy + 3 * scale;
+          paytableContent.addChild(r);
+        }
+        cy += Math.ceil(officers.length / offColCount) * offRowH + 24 * scale;
       }
+
+      // ── Cars ──
+      sectionTitle('CARS', cy);
+      cy += 22 * scale;
+      bodyText('Each car pays a different amount when it exits.', cy);
+      cy += 18 * scale;
+      bodyText('Trucks are rare and pay the most.', cy);
+      cy += 22 * scale;
+      // Row of mini car graphics with the cash a player wins per
+      // exit at the current bet amount. Two values per car — the win
+      // through a corner arrow (4×) and a middle arrow (5×).
+      const carPickColors = ['Compact', 'Sedan', 'SUV', 'Truck'];
+      const carCount = carPickColors.length;
+      const carCellSize = Math.min(58 * scale, (colW - 24 * scale) / carCount);
+      const currentBet = (player && player.bet) || 1;
+      for (let i = 0; i < carCount; i++) {
+        const colName = carPickColors[i];
+        const colDef = COLOR_BY_NAME[colName];
+        if (!colDef) continue;
+        const cellCX = leftX + carCellSize / 2 + i * (carCellSize + 12 * scale);
+        const v = makeVehicleGlyph(colName, colorToUint(colDef.hex), 'up', carCellSize);
+        v.x = cellCX;
+        v.y = cy + carCellSize / 2;
+        paytableContent.addChild(v);
+        // Cash amount won per exit at the current chip value.
+        // Show both corner-arrow win and middle-arrow win.
+        const mult = colDef.payMult || 1;
+        const cornerWin = currentBet * 4 * mult;
+        const middleWin = currentBet * 5 * mult;
+        const cashLine1 = new PIXI.Text(fmtCash(middleWin), {
+          fontFamily: FONT, fontSize: 14 * scale,
+          fill: 0xFFD23F, fontWeight: '800',
+        });
+        cashLine1.anchor.set(0.5, 0);
+        cashLine1.x = cellCX;
+        cashLine1.y = cy + carCellSize + 4 * scale;
+        paytableContent.addChild(cashLine1);
+        const cashLine2 = new PIXI.Text(`or ${fmtCash(cornerWin)}`, {
+          fontFamily: FONT, fontSize: 10 * scale,
+          fill: 0xA8AEB6, fontWeight: '500',
+        });
+        cashLine2.anchor.set(0.5, 0);
+        cashLine2.x = cellCX;
+        cashLine2.y = cy + carCellSize + 22 * scale;
+        paytableContent.addChild(cashLine2);
+      }
+      cy += carCellSize + 40 * scale;
+      bodyText(`Per car at $${currentBet} bet — bigger value on middle arrows, smaller on corner arrows.`, cy, { size: 11, fill: 0xA8AEB6 });
 
       // Rules content (text).
       const rulesContent = new PIXI.Container();
@@ -2208,6 +2597,77 @@ Win = total paytable value × bet of every symbol that exited.`;
       spinBtn: null, infoBtn: null,
     };
 
+    // ── Mode-switcher button + confirm modal ──
+    // TrailCatcher-style: clicking a mode button opens a confirm
+    // dialog with the mode's description. Confirming persists the
+    // choice in localStorage and reloads the page so buildScene
+    // re-runs against the new mode (closure-scoped consts get
+    // re-evaluated). Active mode renders as highlighted.
+    function makeModeButton({ x, y, w, h, label, isActive, onTap }) {
+      const cont = new PIXI.Container();
+      cont.x = x; cont.y = y;
+      const gs = L.gameScale;
+      const bg = new PIXI.Graphics();
+      const draw = (hover = false) => {
+        bg.clear();
+        bg.lineStyle(2 * gs, isActive ? 0xFFD23F : 0x6F7682, 1);
+        const fill = isActive ? 0x2D4373 : (hover ? 0x2A3548 : 0x1A2332);
+        bg.beginFill(fill, 1);
+        bg.drawRoundedRect(-w / 2, -h / 2, w, h, h * 0.4);
+        bg.endFill();
+      };
+      draw(false);
+      cont.addChild(bg);
+      const lbl = new PIXI.Text(label, {
+        fontFamily: FONT, fontSize: 13 * gs,
+        fill: isActive ? 0xFFD23F : 0xE8DDC4,
+        fontWeight: isActive ? '800' : '600',
+        letterSpacing: 0.6,
+      });
+      lbl.anchor.set(0.5);
+      cont.addChild(lbl);
+      cont.eventMode = 'static'; cont.cursor = 'pointer';
+      cont.hitArea = new PIXI.RoundedRectangle(-w / 2, -h / 2, w, h, h * 0.4);
+      cont.on('pointerover', () => {
+        if (isActive) return;
+        draw(true);
+        gsap.to(cont.scale, { x: 1.04, y: 1.04, duration: 0.12, ease: 'sine.out' });
+      });
+      cont.on('pointerout', () => {
+        draw(false);
+        gsap.to(cont.scale, { x: 1, y: 1, duration: 0.12 });
+      });
+      cont.on('pointertap', onTap);
+      return cont;
+    }
+    function openModeConfirmModal(modeKey) {
+      const def = MODE_DEF[modeKey];
+      if (!def) return;
+      _openSimpleModal({
+        title: def.name,
+        bodyLines: (def.description || []).map(text => ({ text })),
+        buttons: [
+          {
+            label: 'CANCEL',
+            fill: 0x4A1A1A, hoverFill: 0x6A2424, stroke: 0xC9A24A,
+            onTap: (close) => close(),
+          },
+          {
+            label: 'PLAY',
+            fill: 0x065F46, hoverFill: 0x10B981, stroke: 0xFFD23F,
+            onTap: (close) => {
+              close();
+              if (MODE === modeKey) return;
+              setMode(modeKey);
+              // Reload so buildScene re-runs against the new mode and
+              // closure-scoped consts pick up the right values.
+              window.location.reload();
+            },
+          },
+        ],
+      });
+    }
+
     function buildScene() {
       L = layout();
       // Reset stage transform before tearing down children — if a resize
@@ -2231,8 +2691,12 @@ Win = total paytable value × bet of every symbol that exited.`;
 
       // Backdrop panel under the whole frame.
       const panel = new PIXI.Graphics();
-      panel.lineStyle(3 * gs, 0xC9A24A, 0.95);   // gold border
-      panel.beginFill(0x1A2238, 0.95);           // panel: slightly raised dark
+      // 30% — asphalt slab + sidewalk curb. Both cool greys, analogous
+      // to the navy canvas → coherent receding base. Value steps:
+      // canvas (#1A2332) < asphalt (#3D4452) < sidewalk (#A8AEB6) <
+      // text (#FFFFFF). Itten light/dark contrast for readability.
+      panel.lineStyle(6 * gs, 0xA8AEB6, 1);
+      panel.beginFill(0x3D4452, 1);
       panel.drawRoundedRect(
         L.frameX - 14 * gs, L.frameY - 14 * gs,
         L.frameSize + 28 * gs, L.frameH + 28 * gs,
@@ -2244,9 +2708,24 @@ Win = total paytable value × bet of every symbol that exited.`;
       // 4. Slot cell backgrounds.
       // Slot cells are placed inside the frame's inner area. Base mode
       // leaves the LEFT column at frame visC=0 (no left conveyor); All
-      // Around inset by 1 on each side so all four edges have conveyor.
+      // Slot cells = asphalt road squares (no lane stripes through the
+      // cells themselves — those are drawn between cells below as a
+      // single grid of lane markers).
       scene.cellBgs = []; scene.cells = []; scene.symbols = []; scene.stamps = [];
-      const slotColOffset = (MODE === 'allAround' || MODE === 'rush') ? 1 : 0;
+      const slotColOffset = (MODE === 'allAround' || MODE === 'rush' || MODE === 'base' || MODE === 'officer') ? 1 : 0;
+      const drawDashedLine = (g, x1, y1, x2, y2, dashLen, gapLen) => {
+        const dx = x2 - x1, dy = y2 - y1;
+        const len = Math.hypot(dx, dy);
+        if (len === 0) return;
+        const ux = dx / len, uy = dy / len;
+        let d = 0;
+        while (d < len) {
+          const e = Math.min(d + dashLen, len);
+          g.moveTo(x1 + ux * d, y1 + uy * d);
+          g.lineTo(x1 + ux * e, y1 + uy * e);
+          d = e + gapLen;
+        }
+      };
       for (let r = 0; r < GAME.ROWS; r++) {
         scene.cellBgs[r] = [];
         for (let c = 0; c < GAME.COLS; c++) {
@@ -2254,13 +2733,284 @@ Win = total paytable value × bet of every symbol that exited.`;
           const x = L.frameX + (L.cellSize + L.cellGap) * visC;
           const y = L.frameY + (L.cellSize + L.cellGap) * visR;
           const bg = new PIXI.Graphics();
-          bg.lineStyle(1.5 * gs, 0x3F4A6E, 0.7);   // slate border, subtle
-          bg.beginFill(0x232B45, 1);               // dark slate cell
-          bg.drawRoundedRect(x, y, L.cellSize, L.cellSize, 8 * gs);
+          // Deep asphalt — near-black square. High contrast against
+          // the cream canvas, no rounded corners (real road squares).
+          bg.lineStyle(0);
+          // Cool asphalt — analogous to the navy canvas (Itten analogous
+          // hue contrast → harmony) but darker for value separation.
+          bg.beginFill(0x3D4452, 1);
+          bg.drawRect(x, y, L.cellSize, L.cellSize);
           bg.endFill();
           frame.addChild(bg);
           scene.cellBgs[r][c] = bg;
         }
+      }
+      // Lane markings — long dashed white lines BETWEEN the cells of
+      // the slot grid (not through them). Run continuously across the
+      // whole grid so the inter-cell gaps read as road lanes.
+      {
+        const C = GAME.COLS, R = GAME.ROWS;
+        const gridLeft = L.frameX + (L.cellSize + L.cellGap) * slotColOffset;
+        const gridTop  = L.frameY + (L.cellSize + L.cellGap) * 1;
+        const gridW    = C * L.cellSize + (C - 1) * L.cellGap;
+        const gridH    = R * L.cellSize + (R - 1) * L.cellGap;
+        const lanes = new PIXI.Graphics();
+        // White lane paint — the dominant marking colour in real overhead
+        // road art (Parking Jam, Traffic Jam 3D). Yellow is reserved for
+        // the conveyor-edge centerline accent.
+        lanes.lineStyle(3 * gs, 0xFFFFFF, 1);
+        const dashLen = Math.max(L.cellSize * 0.20, 16);
+        const gapLen  = Math.max(L.cellSize * 0.18, 14);
+        // Vertical dashes — between column i and i+1.
+        for (let i = 0; i < C - 1; i++) {
+          const x = gridLeft + (i + 1) * L.cellSize + i * L.cellGap + L.cellGap / 2;
+          drawDashedLine(lanes, x, gridTop, x, gridTop + gridH, dashLen, gapLen);
+        }
+        // Horizontal dashes — between row i and i+1.
+        for (let i = 0; i < R - 1; i++) {
+          const y = gridTop + (i + 1) * L.cellSize + i * L.cellGap + L.cellGap / 2;
+          drawDashedLine(lanes, gridLeft, y, gridLeft + gridW, y, dashLen, gapLen);
+        }
+        frame.addChild(lanes);
+
+        // Mini roundabouts at each interior 4-way intersection — small
+        // grey discs ringed in white paint, with a 4-arm traffic light
+        // sitting on top. Each arm is a triangular cone of light pointing
+        // outward toward the next cell, color-coded by traffic state:
+        //   green  = car can move that direction now (its turn this tick)
+        //   yellow = car wants to move but it's not its turn yet
+        //   red    = no car can move that way
+        //   dimmed = idle / bet phase
+        // Roundabouts always render (decorative grid markers, not
+        // tied to the traffic-light feature flag).
+        const roundabouts = new PIXI.Graphics();
+        const rRound = Math.max(L.cellSize * 0.11, 7 * gs);
+        for (let cy = 0; cy < R - 1; cy++) {
+          const y = gridTop + (cy + 1) * L.cellSize + cy * L.cellGap + L.cellGap / 2;
+          for (let cx = 0; cx < C - 1; cx++) {
+            const x = gridLeft + (cx + 1) * L.cellSize + cx * L.cellGap + L.cellGap / 2;
+            roundabouts.lineStyle(1.5 * gs, 0xFFFFFF, 0.95);
+            roundabouts.beginFill(0x2A3140, 1);
+            roundabouts.drawCircle(x, y, rRound);
+            roundabouts.endFill();
+            roundabouts.lineStyle(0);
+            roundabouts.beginFill(0xFFFFFF, 0.85);
+            roundabouts.drawCircle(x, y, rRound * 0.28);
+            roundabouts.endFill();
+          }
+        }
+        frame.addChild(roundabouts);
+
+        // Whole block parked behind TRAFFIC_LIGHTS_ENABLED until we
+        // settle on the final design (cones, fixture dots, state
+        // machine). Roundabouts above are exempt and always render.
+        if (TRAFFIC_LIGHTS_ENABLED) {
+        const coneLen      = L.cellSize * 0.95;
+        const coneHalfBase = L.cellSize * 0.30;   // ~30° half-angle
+        const TL_COLORS = {
+          green:   0x6FB89E,   // muted emerald — green-grey, less candy
+          yellow:  0xD9C88A,   // muted gold — desaturated yellow
+          red:     0x9A7878,   // muted brick — gray-tinged red
+        };
+        // The original loop populated the roundabouts AND a parallel
+        // counter for the cone setup; with roundabouts moved out we
+        // just need the no-op iteration shell here so the rest of the
+        // gated cone-building code keeps the same structure.
+        for (let cy = 0; cy < R - 1; cy++) {
+          for (let cx = 0; cx < C - 1; cx++) {
+            // (no-op — roundabouts handled above)
+          }
+        }
+
+        // Per-cell traffic lights — 16 cells × 4 SOFT lights (N/E/S/W).
+        // Each light is a Sprite using a shared radial-gradient texture
+        // (white → transparent) tinted with the state colour. No hard
+        // triangle outlines — soft glow that shines INTO the destination
+        // cell from the lane line, like a US traffic light hung overhead
+        // and washing the road below.
+        const ARMS = [
+          { ax: 0, ay: -1 },  // 0 = N
+          { ax: 1, ay:  0 },  // 1 = E
+          { ax: 0, ay:  1 },  // 2 = S
+          { ax: -1, ay: 0 },  // 3 = W
+        ];
+        // Sprite rotation per direction. Anchor is (0.5, 1) so the
+        // texture's bottom-centre sits on the lane line; the body of
+        // the sprite extends in the rotated direction.
+        const ARM_ROTATIONS = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
+        const STATE_COLOR = {
+          green:  TL_COLORS.green,
+          yellow: TL_COLORS.yellow,
+          red:    TL_COLORS.red,
+          dim:    TL_COLORS.green,
+        };
+        // Green (current move) and yellow (queued moves) lead; red
+        // ("no traffic this direction this pass") stays visible so
+        // every arm reads as "lit but stopped" rather than absent.
+        // Dim (idle / bet phase) is hidden so the grid is calm
+        // between rounds.
+        const STATE_ALPHA = { green: 0.60, yellow: 0.55, red: 0.25, dim: 0.00 };
+        const TRAIL_DURATION = 0.45;
+        // Build the shared soft-light texture once. The texture is a
+        // CONE — narrow apex at bottom-centre (the lane-line anchor)
+        // fanning out toward the top, with a vertical linear gradient
+        // for "bright source → fading beam". A canvas blur filter
+        // softens the triangle's edges so it reads as a glow rather
+        // than a hard polygon.
+        let softLightTex = null;
+        try {
+          const _slCanvas = document.createElement('canvas');
+          if (!_slCanvas || typeof _slCanvas.getContext !== 'function') throw 0;
+          const _slSize = 256;
+          _slCanvas.width = _slSize; _slCanvas.height = _slSize;
+          const _slCtx = _slCanvas.getContext('2d');
+          // Soften the cone's edges so it doesn't read as a hard
+          // triangle. The blur extends ~18px outside the path, so we
+          // inset the cone away from the canvas edges to avoid clipping.
+          _slCtx.filter = 'blur(18px)';
+          // Triangle path: narrow apex at TOP-centre, wide base at the
+          // bottom. With the sprite anchor at (0.5, 0) and the cone
+          // rotated per-direction, the apex sits at the lane-line
+          // origin and the body extends INWARD into the cell whose
+          // arm this is — so each cell's 4 cones converge in its own
+          // centre and never reach into neighbour cells.
+          const _slApexX = _slSize / 2;
+          const _slApexY = _slSize * 0.05;
+          const _slBaseY = _slSize * 0.90;
+          const _slBaseLeft  = _slSize * 0.06;
+          const _slBaseRight = _slSize * 0.94;
+          _slCtx.beginPath();
+          _slCtx.moveTo(_slApexX, _slApexY);
+          _slCtx.lineTo(_slBaseLeft, _slBaseY);
+          _slCtx.lineTo(_slBaseRight, _slBaseY);
+          _slCtx.closePath();
+          // Linear gradient along the cone's axis: bright at the apex
+          // (= at the lane line), fading to transparent at the base
+          // (= toward the cell centre).
+          const _slG = _slCtx.createLinearGradient(0, _slApexY, 0, _slBaseY);
+          _slG.addColorStop(0.00, 'rgba(255, 255, 255, 1.00)');
+          _slG.addColorStop(0.35, 'rgba(255, 255, 255, 0.55)');
+          _slG.addColorStop(0.75, 'rgba(255, 255, 255, 0.15)');
+          _slG.addColorStop(1.00, 'rgba(255, 255, 255, 0.00)');
+          _slCtx.fillStyle = _slG;
+          _slCtx.fill();
+          softLightTex = PIXI.Texture.from(_slCanvas);
+        } catch (e) {
+          softLightTex = null;
+        }
+        // Dedicated lights layer — must sit ABOVE fxLayer so the cone
+        // glows render on top of cars (including cars in motion that
+        // are temporarily reparented to fxLayer). lightsLayer itself
+        // is added to the stage further down (after fxLayer is built).
+        const lightsLayer = new PIXI.Container();
+        scene.lightsLayer = lightsLayer;
+        const fixtures = new PIXI.Graphics();
+        scene._trafficCells = [];
+        // Pull the cone apex slightly INSIDE the cell (just enough to
+        // clear the lane-line dashes). Origin moves from "on the line"
+        // to "just barely inside the cell".
+        const apexInset  = L.cellSize * 0.02;
+        const edgeOffset = L.cellSize / 2 - apexInset;
+        // Cones are shorter (~0.6 cell) so beams from opposite cells
+        // don't crash into each other in the middle of the grid. They
+        // still cover the near half of the destination lane, which is
+        // what reads as "the green light is here".
+        const armSpriteW = (L.cellSize + L.cellGap) * 0.85;
+        const armSpriteH = (L.cellSize + L.cellGap) * 0.60;
+        // For each cell+direction, skip the arm if its edge faces the
+        // outer conveyor ring — those edges are the EXITS, not interior
+        // lane lines, so no traffic light belongs there.
+        const armFacesExit = (r, c, d) => (
+          (d === 0 && r === 0)         ||  // N edge of top row
+          (d === 1 && c === C - 1)     ||  // E edge of rightmost col
+          (d === 2 && r === R - 1)     ||  // S edge of bottom row
+          (d === 3 && c === 0)              // W edge of leftmost col
+        );
+        for (let r = 0; r < R; r++) {
+          for (let c = 0; c < C; c++) {
+            const cx = gridLeft + c * (L.cellSize + L.cellGap) + L.cellSize / 2;
+            const cy = gridTop  + r * (L.cellSize + L.cellGap) + L.cellSize / 2;
+            const arms = [];
+            for (let d = 0; d < 4; d++) {
+              if (armFacesExit(r, c, d)) {
+                arms.push(null);
+                continue;
+              }
+              const a = ARMS[d];
+              const ox = cx + a.ax * edgeOffset;
+              const oy = cy + a.ay * edgeOffset;
+              const cone = softLightTex
+                ? new PIXI.Sprite(softLightTex)
+                : new PIXI.Sprite(PIXI.Texture.EMPTY || null);
+              if (cone.anchor && cone.anchor.set) cone.anchor.set(0.5, 0);
+              cone.rotation = ARM_ROTATIONS[d];
+              cone.width  = armSpriteW;
+              cone.height = armSpriteH;
+              cone.x = ox; cone.y = oy;
+              cone.tint  = STATE_COLOR.dim;
+              cone.alpha = STATE_ALPHA.dim;
+              lightsLayer.addChild(cone);
+              fixtures.lineStyle(0.8 * gs, 0x000000, 0.85);
+              fixtures.beginFill(0x14181F, 1);
+              fixtures.drawCircle(ox, oy, Math.max(2, L.cellSize * 0.035));
+              fixtures.endFill();
+              arms.push({
+                cone,
+                state: 'dim',
+                trailTween: null,
+              });
+            }
+            scene._trafficCells.push({ r, c, x: cx, y: cy, arms });
+          }
+        }
+        lightsLayer.addChild(fixtures);
+        // (Roundabouts already added to frame outside this gated block.)
+
+        // Apply a state to a single arm. If the arm WAS green and is
+        // transitioning away, kick off a fading green trail tween
+        // before settling on the new state. Otherwise instant set.
+        const applyArmState = (arm, newState) => {
+          const cone = arm.cone;
+          if (arm.trailTween) { arm.trailTween.kill(); arm.trailTween = null; }
+          if (arm.state === 'green' && newState !== 'green') {
+            // Trail: hold green tint, fade alpha to ~zero, then snap
+            // to the new state's colour/alpha.
+            cone.tint  = STATE_COLOR.green;
+            cone.alpha = STATE_ALPHA.green;
+            arm.trailTween = gsap.to(cone, {
+              alpha: 0,
+              duration: TRAIL_DURATION,
+              ease: 'power2.out',
+              onComplete: () => {
+                cone.tint  = STATE_COLOR[newState];
+                cone.alpha = STATE_ALPHA[newState];
+                arm.trailTween = null;
+              },
+            });
+          } else {
+            cone.tint  = STATE_COLOR[newState];
+            cone.alpha = STATE_ALPHA[newState];
+          }
+          arm.state = newState;
+        };
+        scene._applyArmState = applyArmState;
+
+        // Public helpers — used by the animator and round-end cleanup.
+        scene.setTrafficAllDim = () => {
+          for (const tc of scene._trafficCells) {
+            for (const arm of tc.arms) {
+              if (arm) applyArmState(arm, 'dim');
+            }
+          }
+        };
+        // Look up a cell's arm by (row, col, dir). Used by the spin
+        // animator to drive lights from move events. May return null
+        // if the requested arm faces the outer conveyor (edge cell).
+        scene.getCellArm = (r, c, d) => {
+          const tc = scene._trafficCells[r * C + c];
+          return tc && tc.arms[d];
+        };
+        } // end if (TRAFFIC_LIGHTS_ENABLED)
       }
 
       // 5. Ring cells (conveyor) — each one is a "bet target". Tap the
@@ -2292,8 +3042,8 @@ Win = total paytable value × bet of every symbol that exited.`;
         const bg = new PIXI.Graphics();
         const draw = (hover = false) => {
           bg.clear();
-          bg.lineStyle(1.5 * gs, 0xE8786C, 1);
-          bg.beginFill(hover ? 0x6A1A1A : 0x401010, 1);
+          bg.lineStyle(1.5 * gs, 0xE63946, 1);
+          bg.beginFill(hover ? 0xC4262F : 0x8A1A22, 1);
           bg.drawCircle(0, 0, r);
           bg.endFill();
         };
@@ -2301,7 +3051,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         cont.addChild(bg);
         // X glyph
         const x = new PIXI.Graphics();
-        x.lineStyle(2 * gs, 0xFFD2CC, 1);
+        x.lineStyle(2 * gs, 0xFFFFFF, 1);
         const off = r * 0.45;
         x.moveTo(-off, -off); x.lineTo( off,  off);
         x.moveTo( off, -off); x.lineTo(-off,  off);
@@ -2357,13 +3107,47 @@ Win = total paytable value × bet of every symbol that exited.`;
         const cellCont = new PIXI.Container();
         cellCont.x = ctr.x;
         cellCont.y = ctr.y;
-        // Cell BG.
+
+        // Staked-cell glow — sits BEHIND the cell bg. Two concentric
+        // soft yellow rounded-rects acting as a halo. Hidden by
+        // default; toggled by refreshArrowBetVisuals when the cell
+        // gets a stake.
+        const glow = new PIXI.Graphics();
+        const glowOuterPad = 9 * gs;
+        const glowInnerPad = 4 * gs;
+        glow.beginFill(0xFFD23F, 0.10);
+        glow.drawRoundedRect(
+          -L.cellSize / 2 - glowOuterPad,
+          -L.cellSize / 2 - glowOuterPad,
+          L.cellSize + glowOuterPad * 2,
+          L.cellSize + glowOuterPad * 2,
+          (6 + glowOuterPad) * gs
+        );
+        glow.endFill();
+        glow.beginFill(0xFFD23F, 0.20);
+        glow.drawRoundedRect(
+          -L.cellSize / 2 - glowInnerPad,
+          -L.cellSize / 2 - glowInnerPad,
+          L.cellSize + glowInnerPad * 2,
+          L.cellSize + glowInnerPad * 2,
+          (6 + glowInnerPad) * gs
+        );
+        glow.endFill();
+        glow.visible = false;
+        cellCont.addChild(glow);
+        scene._stakeGlows = scene._stakeGlows || {};
+        scene._stakeGlows[pos] = glow;
+
+        // Bet target — dark navy tile, high contrast against the
+        // cream canvas. Acts like a button.
         const bg = new PIXI.Graphics();
-        bg.lineStyle(1.5 * gs, 0xC9A24A, 0.9);
-        bg.beginFill(0x1B2238, 0.95);
+        // Conveyor = same cool asphalt as the inner grid, with a yellow
+        // centerline outline tying it to the WIN-gold accent family.
+        bg.lineStyle(2 * gs, 0xFFD23F, 0.85);
+        bg.beginFill(0x3D4452, 1);
         bg.drawRoundedRect(
           -L.cellSize / 2, -L.cellSize / 2,
-          L.cellSize, L.cellSize, 8 * gs
+          L.cellSize, L.cellSize, 6 * gs
         );
         bg.endFill();
         cellCont.addChild(bg);
@@ -2376,7 +3160,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         let chev = null;
         if (outDir) {
           chev = new PIXI.Graphics();
-          chev.lineStyle(3.5 * gs, 0xFFE082, 0.95);
+          chev.lineStyle(4 * gs, 0xF2C744, 1);   // cadmium-yellow — matches lane paint
           const sz = L.cellSize * 0.14;
           const angle =
             outDir === 'right' ?  0 :
@@ -2395,13 +3179,18 @@ Win = total paytable value × bet of every symbol that exited.`;
           chev.y = 0;     // arrow lives in the middle
           cellCont.addChild(chev);
         }
-        // Multiplier — bottom of the cell, centred.
+        // Multiplier — bright white text on the asphalt cell, like a
+        // freshly-painted road number. Show whole-number values
+        // without trailing ".0" (so "4x" / "5x", not "4.0x" / "5.0x").
+        const _oddsRaw = arrowOddsFor(pos);
+        const _oddsStr = (_oddsRaw % 1 === 0)
+          ? `${_oddsRaw}x`
+          : `${_oddsRaw.toFixed(1)}x`;
         const oddsTxt = new PIXI.Text(
-          `${arrowOddsFor(pos).toFixed(1)}x`,
+          _oddsStr,
           {
             fontFamily: FONT, fontSize: 17 * gs,
-            fill: 0xFFD23F, fontWeight: 'bold',
-            stroke: 0x2A1808, strokeThickness: 2 * gs,
+            fill: 0xFFFFFF, fontWeight: '800',
           }
         );
         oddsTxt.anchor.set(0.5);
@@ -2418,8 +3207,10 @@ Win = total paytable value × bet of every symbol that exited.`;
         const stakeChipW = L.cellSize * 0.46;
         const stakeChipH = L.cellSize * 0.22;
         const stakeChipBg = new PIXI.Graphics();
-        stakeChipBg.lineStyle(1 * gs, 0xFFD23F, 0.95);
-        stakeChipBg.beginFill(0x3A2A0A, 1);
+        // Stake reads as a yellow "construction-zone" chip pinned to the
+        // road — no dark-amber. Saturated yellow body, dark text.
+        stakeChipBg.lineStyle(1 * gs, 0x2A2A28, 0.9);
+        stakeChipBg.beginFill(0xFFD23F, 1);
         stakeChipBg.drawRoundedRect(
           -stakeChipW / 2, -stakeChipH / 2,
           stakeChipW, stakeChipH, stakeChipH * 0.5
@@ -2430,7 +3221,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         cellCont.addChild(stakeChipBg);
         const stakeTxt = new PIXI.Text('', {
           fontFamily: FONT, fontSize: 11 * gs,
-          fill: 0xFFE082, fontWeight: 'bold',
+          fill: 0x1F1F1D, fontWeight: '800',
         });
         stakeTxt.anchor.set(0.5);
         stakeTxt.x = 0;
@@ -2474,6 +3265,157 @@ Win = total paytable value × bet of every symbol that exited.`;
       scene.creatingTileCtr  = null;
       scene.destroyingTileCtr = null;
 
+      // ── Traffic officers ──
+      // Officer sprites are built only when the active mode opts in
+      // (officer / ante / super-ante variants). Base mode leaves
+      // scene.officers unset; the spin-flow's _playOfficerBoosts
+      // early-returns on empty `fired` arrays so no sprite lookup
+      // ever runs.
+      // The actual sprite construction lives in buildOfficerWidgets
+      // at module scope; the per-mode hook below calls into it.
+      const _officerInlineSkip = () => {
+      const officerCornerVis = [
+        { visR: 0,             visC: 0,             corner: 0 }, // TL
+        { visR: 0,             visC: GAME.COLS + 1, corner: 1 }, // TR
+        { visR: GAME.ROWS + 1, visC: GAME.COLS + 1, corner: 2 }, // BR
+        { visR: GAME.ROWS + 1, visC: 0,             corner: 3 }, // BL
+      ];
+      const visToXY = (visR, visC) => ({
+        x: L.frameX + (L.cellSize + L.cellGap) * visC + L.cellSize / 2,
+        y: L.frameY + (L.cellSize + L.cellGap) * visR + L.cellSize / 2,
+      });
+      const makeOfficerSprite = () => {
+        // Cartoon front-view police officer — peaked cap with badge,
+        // sunglasses, mustache, navy uniform with gold tie. Reads as
+        // a person, not a logo.
+        const cont = new PIXI.Container();
+        const s = L.cellSize / 90;
+
+        // Body — navy uniform (drawn first so face/cap layer above)
+        const body = new PIXI.Graphics();
+        body.lineStyle(1.5 * s, 0x000000, 0.9);
+        body.beginFill(0x14213D, 1);
+        body.drawRoundedRect(-18 * s, 8 * s, 36 * s, 24 * s, 4 * s);
+        body.endFill();
+        cont.addChild(body);
+        // Body button line down the front
+        const btnLine = new PIXI.Graphics();
+        btnLine.beginFill(0xFFD23F, 1);
+        btnLine.drawRect(-1.5 * s, 10 * s, 3 * s, 14 * s);
+        btnLine.endFill();
+        // Two gold buttons
+        btnLine.drawCircle(0, 13 * s, 1.6 * s);
+        btnLine.drawCircle(0, 21 * s, 1.6 * s);
+        cont.addChild(btnLine);
+        // Shoulder epaulets
+        const eps = new PIXI.Graphics();
+        eps.beginFill(0xFFD23F, 0.95);
+        eps.drawRoundedRect(-19 * s, 8 * s, 5 * s, 4 * s, 1 * s);
+        eps.drawRoundedRect( 14 * s, 8 * s, 5 * s, 4 * s, 1 * s);
+        eps.endFill();
+        cont.addChild(eps);
+
+        // Face — skin-toned rounded rectangle
+        const face = new PIXI.Graphics();
+        face.lineStyle(1 * s, 0x6E4A2A, 0.7);
+        face.beginFill(0xF2C29A, 1);
+        face.drawRoundedRect(-13 * s, -14 * s, 26 * s, 22 * s, 7 * s);
+        face.endFill();
+        cont.addChild(face);
+
+        // Sunglasses — thick black horizontal bar with two lens highlights
+        const shades = new PIXI.Graphics();
+        shades.beginFill(0x000000, 1);
+        shades.drawRoundedRect(-13 * s, -7 * s, 26 * s, 6 * s, 2 * s);
+        shades.endFill();
+        // Bridge between lenses
+        shades.beginFill(0x1A1A1A, 1);
+        shades.drawRect(-1 * s, -6 * s, 2 * s, 4 * s);
+        shades.endFill();
+        // Lens reflections
+        shades.beginFill(0xFFFFFF, 0.35);
+        shades.drawCircle(-7 * s, -4.5 * s, 1.5 * s);
+        shades.drawCircle( 7 * s, -4.5 * s, 1.5 * s);
+        shades.endFill();
+        cont.addChild(shades);
+
+        // Mustache — two thick arches under the nose
+        const stash = new PIXI.Graphics();
+        stash.lineStyle(1 * s, 0x1A0F08, 1);
+        stash.beginFill(0x3A2818, 1);
+        // Left half
+        stash.moveTo(-9 * s, 1 * s);
+        stash.lineTo(-1 * s, 0 * s);
+        stash.lineTo(-1 * s, 3 * s);
+        stash.lineTo(-9 * s, 4 * s);
+        stash.lineTo(-9 * s, 1 * s);
+        // Right half
+        stash.moveTo( 9 * s, 1 * s);
+        stash.lineTo( 1 * s, 0 * s);
+        stash.lineTo( 1 * s, 3 * s);
+        stash.lineTo( 9 * s, 4 * s);
+        stash.lineTo( 9 * s, 1 * s);
+        stash.endFill();
+        cont.addChild(stash);
+
+        // Cap visor (peak) — thin black bar across the brow
+        const visor = new PIXI.Graphics();
+        visor.lineStyle(1 * s, 0x000000, 1);
+        visor.beginFill(0x0A0A14, 1);
+        visor.drawRoundedRect(-17 * s, -17 * s, 34 * s, 5 * s, 2 * s);
+        visor.endFill();
+        cont.addChild(visor);
+
+        // Cap crown — navy block above the visor
+        const cap = new PIXI.Graphics();
+        cap.lineStyle(1.5 * s, 0x000000, 0.9);
+        cap.beginFill(0x14213D, 1);
+        // Slight trapezoid: narrower at top, wider at bottom
+        cap.moveTo(-13 * s, -30 * s);
+        cap.lineTo( 13 * s, -30 * s);
+        cap.lineTo( 15 * s, -17 * s);
+        cap.lineTo(-15 * s, -17 * s);
+        cap.lineTo(-13 * s, -30 * s);
+        cap.endFill();
+        cont.addChild(cap);
+
+        // Cap badge — gold star centred on the crown
+        const badge = new PIXI.Graphics();
+        badge.lineStyle(0.7 * s, 0x4A3208, 1);
+        badge.beginFill(0xFFD23F, 1);
+        const spikes = 5;
+        const rOut = 4 * s, rIn = 1.6 * s;
+        const cy = -23 * s;
+        for (let i = 0; i < spikes * 2; i++) {
+          const r = i % 2 === 0 ? rOut : rIn;
+          const a = (i / (spikes * 2)) * Math.PI * 2 - Math.PI / 2;
+          const px = Math.cos(a) * r;
+          const py = Math.sin(a) * r + cy;
+          if (i === 0) badge.moveTo(px, py); else badge.lineTo(px, py);
+        }
+        badge.lineTo(Math.cos(-Math.PI / 2) * rOut, Math.sin(-Math.PI / 2) * rOut + cy);
+        badge.endFill();
+        cont.addChild(badge);
+
+        return cont;
+      };
+      scene.officers = [];
+      for (const oc of officerCornerVis) {
+        const ctr = visToXY(oc.visR, oc.visC);
+        const sprite = makeOfficerSprite();
+        sprite.x = ctr.x;
+        sprite.y = ctr.y;
+        sprite._cornerIdx = oc.corner;
+        sprite._cornerCenter = { x: ctr.x, y: ctr.y };
+        frame.addChild(sprite);
+        scene.officers.push(sprite);
+      }
+      };
+      // _officerInlineSkip is intentionally never called — it just
+      // parks the legacy inline officer code so the diff stays small.
+      // The officer hook below builds officers via buildOfficerWidgets.
+      void _officerInlineSkip;
+
       // ── All Around: 3 corner ×2 markers ──────────────────────────────
       // Visual gates between sides where tokens upgrade tier. Drawn in
       // the frame's outer corner cells (TR, BR, BL). The TL corner is
@@ -2496,7 +3438,6 @@ Win = total paytable value × bet of every symbol that exited.`;
           const txt = new PIXI.Text('×2', {
             fontFamily: FONT, fontSize: L.cellSize * 0.45,
             fill: 0xFFD54F, fontWeight: 'bold',
-            stroke: 0x2A1808, strokeThickness: 3 * gs,
           });
           txt.anchor.set(0.5);
           txt.x = x + L.cellSize / 2;
@@ -2561,7 +3502,7 @@ Win = total paytable value × bet of every symbol that exited.`;
 
       // Mask the slot ROWS×COLS region for all four layers (tint, big
       // text, symbols, badge).
-      const slotColStart = (MODE === 'allAround' || MODE === 'rush') ? 1 : 0;
+      const slotColStart = (MODE === 'allAround' || MODE === 'rush' || MODE === 'base' || MODE === 'officer') ? 1 : 0;
       const slotLeft = L.frameX + (L.cellSize + L.cellGap) * slotColStart;
       const slotRight = slotLeft + (L.cellSize + L.cellGap) * GAME.COLS - L.cellGap;
       const slotTop = L.frameY + (L.cellSize + L.cellGap) * 1;
@@ -2587,6 +3528,10 @@ Win = total paytable value × bet of every symbol that exited.`;
       const fx = new PIXI.Container();
       scene.fxLayer = fx;
       scene.stage.addChild(fx);
+      // 8b. Traffic-light cones layer — even higher z than fxLayer so
+      // the green/yellow glows render ABOVE cars, including cars
+      // currently being animated through fxLayer.
+      if (scene.lightsLayer) scene.stage.addChild(scene.lightsLayer);
 
       // ─────────────────────────────────────────────────────────────
       //   HUD layout (Stake-style instant-win)
@@ -2604,22 +3549,16 @@ Win = total paytable value × bet of every symbol that exited.`;
 
       // ── Top bar ────────────────────────────────────────────────
       // Thin strip across the top with info + balance + win.
-      const topBg = new PIXI.Graphics();
-      topBg.beginFill(0x0F1726, 0.92);
-      topBg.drawRect(0, 0, L.sw, TOP_BAR_H);
-      topBg.endFill();
-      topBg.lineStyle(1, 0x1F2A40, 1);
-      topBg.moveTo(0, TOP_BAR_H);
-      topBg.lineTo(L.sw, TOP_BAR_H);
-      scene.stage.addChild(topBg);
+      // No top bar fill — the BALANCE pill floats directly on the navy
+      // canvas. Removes the unnecessary horizontal slab and keeps the
+      // top of the screen visually quiet.
 
-      // Info icon — far left of top bar.
+      // Info icon — placed at the bottom panel (set later after the
+      // panel CY is computed). Built here, positioned below.
       const infoSize = 36;
       scene.infoBtn = new PIXI.Sprite(infoButtonTexture);
       scene.infoBtn.anchor.set(0.5);
       scene.infoBtn.scale.set(infoSize / infoButtonTexture.height);
-      scene.infoBtn.x = 24 + infoSize / 2;
-      scene.infoBtn.y = TOP_BAR_H / 2;
       scene.infoBtn.eventMode = 'static'; scene.infoBtn.cursor = 'pointer';
       const infoBaseScale = scene.infoBtn.scale.x;
       scene.infoBtn.on('pointerover', () => gsap.to(scene.infoBtn.scale, { x: infoBaseScale * 1.10, y: infoBaseScale * 1.10, duration: 0.12 }));
@@ -2627,152 +3566,173 @@ Win = total paytable value × bet of every symbol that exited.`;
       scene.infoBtn.on('pointertap',  () => openPaytableModal());
       scene.stage.addChild(scene.infoBtn);
 
-      // Balance + Win — slim inline pills on the top bar.
+      // Balance — vertical-stack pill so any value width fits cleanly:
+      //   tiny LABEL on top, value below in larger weight.
       const makeTopBarPill = (label, value, accent) => {
-        const w = 160, h = 38;
+        const w = 180, h = 42;
         const cont = new PIXI.Container();
-        const bg = new PIXI.Graphics();
-        bg.lineStyle(1, accent, 0.85);
-        bg.beginFill(0x182135, 0.95);
-        bg.drawRoundedRect(-w / 2, -h / 2, w, h, h * 0.3);
-        bg.endFill();
-        cont.addChild(bg);
+        // No background — label + value float on the navy canvas to
+        // remove the unnecessary dark slab that was bracketing the
+        // BALANCE readout.
         const lbl = new PIXI.Text(label, {
-          fontFamily: FONT, fontSize: 9, fill: accent, letterSpacing: 1.5,
+          fontFamily: FONT, fontSize: 9, fill: 0xFFD23F,
+          letterSpacing: 1.6, fontWeight: '700',
         });
-        lbl.anchor.set(0, 0.5);
-        lbl.x = -w / 2 + 14;
-        lbl.y = 0;
+        lbl.anchor.set(0.5, 0);
+        lbl.x = 0;
+        lbl.y = -h / 2 + 4;
         cont.addChild(lbl);
         const val = new PIXI.Text(value, {
-          fontFamily: FONT, fontSize: 16, fill: 0xFFECB3, fontWeight: 'bold',
+          fontFamily: FONT, fontSize: 16, fill: 0xFFFFFF, fontWeight: '800',
         });
-        val.anchor.set(1, 0.5);
-        val.x = w / 2 - 14;
-        val.y = 0;
+        val.anchor.set(0.5, 0);
+        val.x = 0;
+        val.y = -h / 2 + 18;
         cont.addChild(val);
         cont.valText = val;
         cont.labelText = lbl;
         return cont;
       };
-      // Balance + Win are positioned in the top bar over the GRID
-      // area (right side), so they read with the game rather than the
-      // bet panel.
-      const topPillW   = 160;
-      // Balance only on the top bar (slim pill, far right).
+      const topPillW   = 180;
+      // Position the BALANCE pill in the BOTTOM half of the topBar so
+      // it sits next to / below the mode-button row that takes the
+      // top half of the bar.
       scene.balancePill = makeTopBarPill('BALANCE', fmtCash(player.balance), 0xC9A24A);
       scene.balancePill.x = L.sw - 24 - topPillW / 2;
-      scene.balancePill.y = TOP_BAR_H / 2;
+      scene.balancePill.y = TOP_BAR_H - 24;
       scene.stage.addChild(scene.balancePill);
+
+      // ── Mode-button row + caption ──
+      // Centred at the top of the canvas. Generated from MODE_DEF
+      // sorted by displayOrder so adding a 3rd / 4th variant
+      // (Ante / Super-Ante) just registers another MODE_DEF entry.
+      const modeList = Object.values(MODE_DEF)
+        .slice()
+        .sort((a, b) => (a.displayOrder ?? 999) - (b.displayOrder ?? 999));
+      const modeBtnW = 150 * gs;
+      const modeBtnH = 28 * gs;
+      const modeGap  = 10 * gs;
+      const modeRowW = modeList.length * modeBtnW + (modeList.length - 1) * modeGap;
+      const modeRowLeftCX = (L.sw - modeRowW) / 2 + modeBtnW / 2;
+      const modeCaptionY = 8 * gs;
+      const modeRowY = modeCaptionY + 16 * gs + modeBtnH / 2;
+      const modeCaption = new PIXI.Text('GAME MODE', {
+        fontFamily: FONT, fontSize: 10 * gs, fill: 0xFFD23F,
+        letterSpacing: 2.4, fontWeight: '700',
+      });
+      modeCaption.anchor.set(0.5, 0);
+      modeCaption.x = L.sw / 2;
+      modeCaption.y = modeCaptionY;
+      modeCaption.alpha = 0.85;
+      scene.stage.addChild(modeCaption);
+      modeList.forEach((m, i) => {
+        const btn = makeModeButton({
+          x: modeRowLeftCX + i * (modeBtnW + modeGap),
+          y: modeRowY,
+          w: modeBtnW, h: modeBtnH,
+          label: m.name,
+          isActive: m.key === MODE,
+          onTap: () => {
+            if (scene.spinBtn && scene.spinBtn.busy) return;
+            openModeConfirmModal(m.key);
+          },
+        });
+        scene.stage.addChild(btn);
+      });
 
       // ── BIG WIN headline + status subtitle (above the grid) ────
       // The WIN amount is the dominant visual on the screen — Aviator-
       // style centred number that pops on each round resolution.
-      const winBandTop = TOP_BAR_H;
+      // WIN block — anchored to the GRID TOP (not the canvas top) with
+      // a fixed breathing-room gap. WIN headline sits on top, status
+      // subtitle directly below it. The whole block hugs the grid so
+      // both elements are visually associated with the play area, not
+      // the BALANCE pill above.
+      const HUD_BREATH = 24;        // breathing room between HUD blocks and the grid
+      const STATUS_GAP = 6;         // inner gap between WIN amount and status line
       const winCenterX = L.frameX + L.frameSize / 2;
-      const winCenterY = winBandTop + (L.winBandH * 0.45);
-      const bigWinTxt = new PIXI.Text(fmtCash(0), {
-        fontFamily: FONT, fontSize: 48,
-        fill: 0xFFE082, fontWeight: 'bold',
-        stroke: 0x2A1808, strokeThickness: 4,
-      });
-      bigWinTxt.anchor.set(0.5);
-      bigWinTxt.x = winCenterX;
-      bigWinTxt.y = winCenterY;
-      scene.stage.addChild(bigWinTxt);
-      // Wrap as a "winPill" so existing setWinDisplay/_addToRunningWin
-      // code that looks up scene.winPill.valText keeps working.
-      scene.winPill = { valText: bigWinTxt, x: winCenterX, y: winCenterY };
+      // Status — anchor bottom-centre, bottom edge sits HUD_BREATH above grid.
       scene.statusText = new PIXI.Text('PLACE YOUR BETS', {
         fontFamily: FONT, fontSize: 14,
-        fill: 0x9DA8C0, letterSpacing: 3,
+        fill: 0xFFFFFF, letterSpacing: 3, fontWeight: '700',
       });
-      scene.statusText.anchor.set(0.5);
+      scene.statusText.anchor.set(0.5, 1);
       scene.statusText.x = winCenterX;
-      scene.statusText.y = winBandTop + L.winBandH - 14;
+      scene.statusText.y = L.frameY - HUD_BREATH;
       scene.stage.addChild(scene.statusText);
-
-      // ── Side bet panel ─────────────────────────────────────────
-      // Vertical column on the right: chip selector → total bet →
-      // controls → big PLAY button. Anchored to absolute pixel sizes
-      // (not gameScale) so the panel stays consistent across screens.
-      const panelX  = L.sidePanelX;
-      const panelW  = L.sidePanelW;
-      const panelTop = TOP_BAR_H + 12;
-      const panelBottom = L.sh - 12;
-      const panelInnerLeft  = panelX + 18;
-      const panelInnerRight = panelX + panelW - 18;
-      const panelInnerW     = panelInnerRight - panelInnerLeft;
-
-      // Panel BG card
-      const panelBg = new PIXI.Graphics();
-      panelBg.lineStyle(1.5, 0x2A3550, 1);
-      panelBg.beginFill(0x141B2E, 0.95);
-      panelBg.drawRoundedRect(panelX + 6, panelTop, panelW - 12, panelBottom - panelTop, 14);
-      panelBg.endFill();
-      scene.stage.addChild(panelBg);
-
-      // Section helpers.
-      let sectionY = panelTop + 18;
-      const sectionLabel = (text) => {
-        const t = new PIXI.Text(text, {
-          fontFamily: FONT, fontSize: 11,
-          fill: 0x8090B0, letterSpacing: 2.5,
-        });
-        t.x = panelInnerLeft;
-        t.y = sectionY;
-        scene.stage.addChild(t);
-        sectionY += 18;
+      // WIN amount — anchor bottom-centre, bottom edge sits STATUS_GAP
+      // above the status text. Stacks above status, block hugs grid.
+      // Format includes a "WIN " prefix so the meaning of the number
+      // is unambiguous; the smaller font size matches the more compact
+      // top-bar feel.
+      const bigWinTxt = new PIXI.Text(fmtWin(0), {
+        fontFamily: FONT, fontSize: 28,
+        fill: 0xFFD23F, fontWeight: '800',
+      });
+      bigWinTxt.anchor.set(0.5, 1);
+      bigWinTxt.x = winCenterX;
+      bigWinTxt.y = scene.statusText.y - scene.statusText.height - STATUS_GAP;
+      scene.stage.addChild(bigWinTxt);
+      // winPill.y is consumed by fx animations as the WIN visual centre
+      // (e.g. pay-text flights). Anchor is (0.5, 1) so visual centre is
+      // at .y - .height/2.
+      scene.winPill = {
+        valText: bigWinTxt,
+        x: winCenterX,
+        y: bigWinTxt.y - bigWinTxt.height / 2,
       };
 
-      // Tabs (Manual highlighted; Auto disabled placeholder).
-      const tabH = 32;
-      const tabW = (panelInnerW - 6) / 2;
-      const drawTab = (label, x, active, enabled = true) => {
-        const c = new PIXI.Container();
-        const bg = new PIXI.Graphics();
-        bg.lineStyle(1.5, active ? 0xC9A24A : 0x2A3550, 1);
-        bg.beginFill(active ? 0x2A2010 : 0x0F1726, 0.95);
-        bg.drawRoundedRect(0, 0, tabW, tabH, 8);
-        bg.endFill();
-        c.addChild(bg);
-        const t = new PIXI.Text(label, {
-          fontFamily: FONT, fontSize: 13,
-          fill: enabled ? (active ? 0xFFE082 : 0xC9A24A) : 0x4F5A78,
-          fontWeight: 'bold', letterSpacing: 2,
-        });
-        t.anchor.set(0.5);
-        t.x = tabW / 2; t.y = tabH / 2;
-        c.addChild(t);
-        c.x = x; c.y = sectionY;
-        c.alpha = enabled ? 1 : 0.55;
-        scene.stage.addChild(c);
-        return c;
-      };
-      drawTab('MANUAL', panelInnerLeft,            true,  true);
-      drawTab('AUTO',   panelInnerLeft + tabW + 6, false, false);
-      sectionY += tabH + 18;
+      // ── Bottom panel ───────────────────────────────────────────
+      // Layout (left → right):
+      //   [info]  [chips]  ┌── Clear Bets ──┐  [TOTAL BET]  [  PLAY  ]
+      //                    └── Repeat Bet ──┘
+      // Clear / Repeat are stacked vertically into one column to the
+      // left of TOTAL BET. PLAY is taller and sits on the far right.
+      const panelTop    = L.frameY + L.frameH + HUD_BREATH;
+      const panelBottom = panelTop + L.bottomPanelH;
+      const panelCY     = (panelTop + panelBottom) / 2;
 
-      // Chip selector.
-      sectionLabel('BET AMOUNT');
-      const chipR    = 22;
-      const chipGap  = (panelInnerW - CHIP_VALUES.length * chipR * 2) / (CHIP_VALUES.length - 1);
-      const chipsRowY = sectionY + chipR;
+      // Chip selector — 4 circular pills.
+      const chipR   = 24;
+      const chipGap = 12;
+      const chipsW  = CHIP_VALUES.length * chipR * 2 + (CHIP_VALUES.length - 1) * chipGap;
+      const totalBoxW = 150;
+      const totalBoxH = 56;
+      // Stacked control column — Clear Bets (top) over Repeat Bet (bottom).
+      const ctrlW         = 110;
+      const ctrlH         = 28;
+      const stackInnerGap = 4;
+      const stackH        = ctrlH * 2 + stackInnerGap;   // 60
+      // PLAY — taller now that controls aren't on top of it.
+      const playW    = 180;
+      const playH    = 60;
+      const sectionGap = 26;
+      const rowW = chipsW + sectionGap + ctrlW + sectionGap + totalBoxW + sectionGap + playW;
+      const rowLeft = (L.sw - rowW) / 2;
+      // Info button sits just left of the chips, anchored close to the
+      // bet-controls cluster so it reads as part of the bottom row, not
+      // an orphan in the corner.
+      scene.infoBtn.x = rowLeft - 18 - infoSize / 2;
+      scene.infoBtn.y = panelCY;
+
+      // Chip selector
       const makeChipButton = (value) => {
         const cont = new PIXI.Container();
         cont._chipValue = value;
         const bg = new PIXI.Graphics();
         const txt = new PIXI.Text(`$${value}`, {
-          fontFamily: FONT, fontSize: 14, fill: 0xFFE082, fontWeight: 'bold',
+          fontFamily: FONT, fontSize: 15, fill: 0xFFFFFF, fontWeight: '800',
         });
         txt.anchor.set(0.5);
         cont._draw = (active) => {
           bg.clear();
-          bg.lineStyle(active ? 3 : 2, active ? 0xFFD23F : 0xC9A24A, 0.95);
-          bg.beginFill(active ? 0x3A2A0A : 0x1A2238, 0.95);
+          // Inactive = cool dark slate disc, white $; active = saturated
+          // yellow disc, dark $ — saturation contrast pop selects state.
+          bg.lineStyle(active ? 3 : 2, active ? 0x1A2332 : 0xFFD23F, 1);
+          bg.beginFill(active ? 0xFFD23F : 0x2A3548, 1);
           bg.drawCircle(0, 0, chipR);
           bg.endFill();
-          txt.style.fill = active ? 0xFFE082 : 0xC9A24A;
+          txt.style.fill = active ? 0x1A2332 : 0xFFFFFF;
         };
         cont._draw(value === player.bet);
         cont.addChild(bg);
@@ -2786,102 +3746,113 @@ Win = total paytable value × bet of every symbol that exited.`;
         return cont;
       };
       scene.chipBtns = [];
-      let chipX = panelInnerLeft + chipR;
+      let chipX = rowLeft + chipR;
       for (const v of CHIP_VALUES) {
         const c = makeChipButton(v);
         c.x = chipX;
-        c.y = chipsRowY;
+        c.y = panelCY;
         scene.stage.addChild(c);
         scene.chipBtns.push(c);
         chipX += chipR * 2 + chipGap;
       }
-      sectionY = chipsRowY + chipR + 18;
+      const afterChipsX = rowLeft + chipsW + sectionGap;
 
-      // Total bet display.
-      sectionLabel('TOTAL BET');
-      const totalBg = new PIXI.Graphics();
-      totalBg.lineStyle(1.5, 0xFFD23F, 0.85);
-      totalBg.beginFill(0x0F1726, 0.95);
-      totalBg.drawRoundedRect(panelInnerLeft, sectionY, panelInnerW, 40, 8);
-      totalBg.endFill();
-      scene.stage.addChild(totalBg);
-      const totalTxt = new PIXI.Text(fmtCash(0), {
-        fontFamily: FONT, fontSize: 22, fill: 0xFFE082, fontWeight: 'bold',
-      });
-      totalTxt.anchor.set(0.5);
-      totalTxt.x = panelInnerLeft + panelInnerW / 2;
-      totalTxt.y = sectionY + 20;
-      scene.stage.addChild(totalTxt);
-      scene.totalBetPill = { valText: totalTxt };
-      sectionY += 40 + 18;
-
-      // Control buttons — 2x2 grid.
-      const ctrlW = (panelInnerW - 8) / 2;
-      const ctrlH = 32;
-      const ctrlGap = 8;
+      // Control buttons — CLEAR ALL + REPEAT only.
       const makeControlButton = (label, accent, onTap) => {
         const cont = new PIXI.Container();
         const bg = new PIXI.Graphics();
         const draw = (hover = false) => {
           bg.clear();
-          bg.lineStyle(1.5, accent, 0.85);
-          bg.beginFill(hover ? 0x2C3552 : 0x0F1726, 0.95);
-          bg.drawRoundedRect(0, 0, ctrlW, ctrlH, 7);
+          bg.lineStyle(2, accent, 1);
+          bg.beginFill(hover ? 0x3D4A66 : 0x2A3548, 1);
+          bg.drawRoundedRect(-ctrlW / 2, -ctrlH / 2, ctrlW, ctrlH, 10);
           bg.endFill();
         };
         draw();
         cont.addChild(bg);
         const t = new PIXI.Text(label, {
-          fontFamily: FONT, fontSize: 12, fill: 0xFFECB3,
-          fontWeight: 'bold', letterSpacing: 1.5,
+          fontFamily: FONT, fontSize: 11, fill: 0xFFFFFF,
+          fontWeight: '800', letterSpacing: 1.2,
         });
         t.anchor.set(0.5);
-        t.x = ctrlW / 2; t.y = ctrlH / 2;
         cont.addChild(t);
         cont.eventMode = 'static';
         cont.cursor = 'pointer';
-        cont.hitArea = new PIXI.Rectangle(0, 0, ctrlW, ctrlH);
+        cont.hitArea = new PIXI.Rectangle(-ctrlW / 2, -ctrlH / 2, ctrlW, ctrlH);
         cont.on('pointerover', () => { draw(true); });
         cont.on('pointerout',  () => { draw(false); });
         cont.on('pointertap', onTap);
         return cont;
       };
-      scene.ctrlButtons = {};
-      const placeCtrl = (key, label, accent, fn, col, row) => {
-        const b = makeControlButton(label, accent, fn);
-        b.x = panelInnerLeft + col * (ctrlW + ctrlGap);
-        b.y = sectionY + row * (ctrlH + ctrlGap);
-        scene.stage.addChild(b);
-        scene.ctrlButtons[key] = b;
-      };
-      placeCtrl('clear',  'CLEAR ALL', 0xE8786C, () => clearAllArrowBets(), 0, 0);
-      placeCtrl('repeat', 'REPEAT',    0x6FE0D6, () => repeatLastBets(),    1, 0);
-      placeCtrl('double', '×2',        0xC9A24A, () => scaleAllBets(2),     0, 1);
-      placeCtrl('half',   '½',         0xC9A24A, () => scaleAllBets(0.5),   1, 1);
-      sectionY += 2 * ctrlH + ctrlGap + 22;
+      // Vertical control stack — Clear Bets (top) + Repeat Bet (bottom),
+      // sitting between the chips and TOTAL BET. Same column, stacked
+      // top-down with stackInnerGap between rows.
+      const stackTopRowCY    = panelCY - (stackH / 2) + ctrlH / 2;
+      const stackBottomRowCY = panelCY + (stackH / 2) - ctrlH / 2;
+      const stackCX          = afterChipsX + ctrlW / 2;
 
-      // PLAY button — placed directly below the controls, not pinned to
-      // the panel bottom (no need to fill leftover space).
-      const playW  = panelInnerW;
-      const playH  = 64;
-      const playCX = panelInnerLeft + playW / 2;
-      const playCY = sectionY + playH / 2;
+      scene.ctrlButtons = {};
+      const clearBtn = makeControlButton('Clear Bets', 0xE63946, () => clearAllArrowBets());
+      clearBtn.x = stackCX;
+      clearBtn.y = stackTopRowCY;
+      scene.stage.addChild(clearBtn);
+      scene.ctrlButtons.clear = clearBtn;
+      const repeatBtn = makeControlButton('Repeat Bet', 0xFFD23F, () => repeatLastBets());
+      repeatBtn.x = stackCX;
+      repeatBtn.y = stackBottomRowCY;
+      scene.stage.addChild(repeatBtn);
+      scene.ctrlButtons.repeat = repeatBtn;
+
+      // TOTAL BET — boxed display, now to the RIGHT of the control stack.
+      const afterStackX = afterChipsX + ctrlW + sectionGap;
+      const totalBoxX = afterStackX;
+      const totalBg = new PIXI.Graphics();
+      totalBg.lineStyle(2, 0xFFD23F, 1);
+      totalBg.beginFill(0x2A3548, 1);
+      totalBg.drawRoundedRect(totalBoxX, panelCY - totalBoxH / 2, totalBoxW, totalBoxH, 10);
+      totalBg.endFill();
+      scene.stage.addChild(totalBg);
+      const totalLabel = new PIXI.Text('TOTAL BET', {
+        fontFamily: FONT, fontSize: 9, fill: 0xFFD23F, letterSpacing: 1.8, fontWeight: '700',
+      });
+      totalLabel.anchor.set(0.5);
+      totalLabel.x = totalBoxX + totalBoxW / 2;
+      totalLabel.y = panelCY - totalBoxH / 2 + 12;
+      scene.stage.addChild(totalLabel);
+      const totalTxt = new PIXI.Text(fmtCash(0), {
+        fontFamily: FONT, fontSize: 20, fill: 0xFFFFFF, fontWeight: '800',
+      });
+      totalTxt.anchor.set(0.5);
+      totalTxt.x = totalBoxX + totalBoxW / 2;
+      totalTxt.y = panelCY + 8;
+      scene.stage.addChild(totalTxt);
+      scene.totalBetPill = { valText: totalTxt };
+      const afterTotalX = totalBoxX + totalBoxW + sectionGap;
+
+      // PLAY button — far right, taller than the controls so the CTA
+      // dominates the row.
+      const playCX = afterTotalX + playW / 2;
+      const playCY = panelCY;
       const btn = new PIXI.Container();
       btn.x = playCX; btn.y = playCY;
       const playBg = new PIXI.Graphics();
       const drawPlay = (hover = false, dim = false) => {
         playBg.clear();
-        playBg.lineStyle(3, 0xA8E060, 0.95);
-        playBg.beginFill(dim ? 0x1F3A1F : (hover ? 0x4FB05F : 0x3D8E4F), 0.95);
-        playBg.drawRoundedRect(-playW / 2, -playH / 2, playW, playH, 14);
+        // 10% — saturated emerald green CTA. Universal "GO" affordance —
+        // every start/play/install button in software is green for a
+        // reason that overrides abstract colour-wheel contrast: users
+        // pattern-match green = proceed instantly. Hover brightens; dim
+        // when busy.
+        playBg.lineStyle(2, 0x065F46, 1);
+        playBg.beginFill(dim ? 0x065F46 : (hover ? 0x34D399 : 0x10B981), 1);
+        playBg.drawRoundedRect(-playW / 2, -playH / 2, playW, playH, 12);
         playBg.endFill();
       };
       drawPlay();
       btn.addChild(playBg);
       const playLbl = new PIXI.Text('PLAY', {
         fontFamily: FONT, fontSize: 24,
-        fill: 0xFFFFFF, fontWeight: 'bold', letterSpacing: 5,
-        stroke: 0x1F3A1F, strokeThickness: 3,
+        fill: 0xFFFFFF, fontWeight: '800', letterSpacing: 5,
       });
       playLbl.anchor.set(0.5);
       btn.addChild(playLbl);
@@ -2896,7 +3867,18 @@ Win = total paytable value × bet of every symbol that exited.`;
         btn.busy = b;
         btn.alpha = b ? 0.55 : 1;
         btn.cursor = b ? 'default' : 'pointer';
-        playLbl.text = b ? 'ROLLING' : 'PLAY';
+        // "UNJAMMING" is much wider than "PLAY", so when busy we
+        // shrink the font + tighten the letter-spacing so the label
+        // fits inside the green pill cleanly.
+        if (b) {
+          playLbl.text = 'UNJAMMING';
+          playLbl.style.fontSize = 16;
+          playLbl.style.letterSpacing = 1.5;
+        } else {
+          playLbl.text = 'PLAY';
+          playLbl.style.fontSize = 24;
+          playLbl.style.letterSpacing = 5;
+        }
         drawPlay(false, b);
       };
       scene.stage.addChild(btn);
@@ -2904,20 +3886,188 @@ Win = total paytable value × bet of every symbol that exited.`;
       // BUY FEATURE intentionally off in rush mode.
       scene.buyBtn = null;
 
+      // ── REPEAT BET overlay — appears at the centre of the inner grid
+      // after a round resolves (won or lost), prompting the player to
+      // re-stake the same pattern. Auto-dismisses on:
+      //   • the player tapping it (which re-applies player.lastBets)
+      //   • the player tapping any arrow / placing a fresh bet
+      //   • the next spin starting
+      const _slotColOffset = (MODE === 'allAround' || MODE === 'rush' || MODE === 'base' || MODE === 'officer') ? 1 : 0;
+      const _gridLeft = L.frameX + (L.cellSize + L.cellGap) * _slotColOffset;
+      const _gridTop  = L.frameY + (L.cellSize + L.cellGap) * 1;
+      const _gridW    = GAME.COLS * L.cellSize + (GAME.COLS - 1) * L.cellGap;
+      const _gridH    = GAME.ROWS * L.cellSize + (GAME.ROWS - 1) * L.cellGap;
+      const rbW = 200 * gs, rbH = 60 * gs;
+      const rbBtn = new PIXI.Container();
+      rbBtn.x = _gridLeft + _gridW / 2;
+      rbBtn.y = _gridTop  + _gridH / 2;
+      const rbBg = new PIXI.Graphics();
+      const drawRb = (hover = false) => {
+        rbBg.clear();
+        rbBg.lineStyle(2 * gs, 0x065F46, 1);
+        rbBg.beginFill(hover ? 0x34D399 : 0x10B981, 1);
+        rbBg.drawRoundedRect(-rbW / 2, -rbH / 2, rbW, rbH, 14 * gs);
+        rbBg.endFill();
+      };
+      drawRb();
+      rbBtn.addChild(rbBg);
+      const rbLbl = new PIXI.Text('REPEAT BET', {
+        fontFamily: FONT, fontSize: 18 * gs, fontWeight: '800',
+        fill: 0xFFFFFF, letterSpacing: 2,
+      });
+      rbLbl.anchor.set(0.5);
+      rbBtn.addChild(rbLbl);
+      rbBtn.eventMode = 'static';
+      rbBtn.cursor = 'pointer';
+      rbBtn.hitArea = new PIXI.Rectangle(-rbW / 2, -rbH / 2, rbW, rbH);
+      rbBtn.on('pointerover', () => { drawRb(true);  gsap.to(rbBtn.scale, { x: 1.05, y: 1.05, duration: 0.12 }); });
+      rbBtn.on('pointerout',  () => { drawRb(false); gsap.to(rbBtn.scale, { x: 1, y: 1, duration: 0.12 }); });
+      rbBtn.on('pointertap',  () => {
+        // Restage the previous round's bets, then auto-spin. One-tap
+        // re-roll: the player doesn't have to tap PLAY again after.
+        repeatLastBets();
+        hideRepeatBetButton();
+        // Only fire the spin if repeatLastBets actually staged
+        // something (e.g. it bails out silently on insufficient
+        // balance). Check player.arrowBets for >0 before spinning.
+        if (sumArrowBets(player.arrowBets) > 0) {
+          onSpinClick();
+        }
+      });
+      rbBtn.alpha = 0;
+      rbBtn.visible = false;
+      rbBtn.scale.set(0.85);
+      scene.stage.addChild(rbBtn);
+      scene.repeatBetBtn = rbBtn;
+
+      // ── End-of-round WIN popup — sits ABOVE the REPEAT BET button.
+      // Background is a radial gradient (yellow → transparent) drawn
+      // on a canvas so it has soft edges with no hard rectangle, and
+      // looks like a glow rather than a panel. The amount text sits
+      // on top, large and centred on the same x as REPEAT BET.
+      // Visibility is gated by setRoundStatus + win > 0.
+      const winPopupGlowSize = Math.round(420 * gs);
+      // Soft dark radial halo — black-ish at centre fading to fully
+      // transparent at the edges. Sits BEHIND both the WIN texts and
+      // the REPEAT BET button so it reads like a vignette/aura, not a
+      // panel. Sim sandbox lacks canvas.getContext, so a multi-circle
+      // PIXI fallback is used there.
+      const winPopup = new PIXI.Container();
+      let winPopupGlow = null;
+      try {
+        const _glowCanvas = document.createElement('canvas');
+        if (!_glowCanvas || typeof _glowCanvas.getContext !== 'function') throw 0;
+        _glowCanvas.width  = winPopupGlowSize;
+        _glowCanvas.height = winPopupGlowSize;
+        const _glowCtx = _glowCanvas.getContext('2d');
+        const _glowR = winPopupGlowSize / 2;
+        const _radial = _glowCtx.createRadialGradient(
+          _glowR, _glowR, 0, _glowR, _glowR, _glowR
+        );
+        // Dark slate fades to fully transparent. Stronger than yellow
+        // for "popup" feel; doesn't compete with the yellow WIN amount.
+        _radial.addColorStop(0,    'rgba(8, 14, 26, 0.85)');
+        _radial.addColorStop(0.45, 'rgba(8, 14, 26, 0.55)');
+        _radial.addColorStop(0.80, 'rgba(8, 14, 26, 0.15)');
+        _radial.addColorStop(1,    'rgba(8, 14, 26, 0.00)');
+        _glowCtx.fillStyle = _radial;
+        _glowCtx.fillRect(0, 0, winPopupGlowSize, winPopupGlowSize);
+        const winPopupTex = PIXI.Texture.from(_glowCanvas);
+        winPopupGlow = new PIXI.Sprite(winPopupTex);
+        winPopupGlow.anchor.set(0.5);
+      } catch (e) {
+        // Sim fallback — concentric dark circles approximate the radial.
+        const g = new PIXI.Graphics();
+        const steps = 12;
+        for (let i = 0; i < steps; i++) {
+          const t = i / steps;
+          const a = 0.78 * Math.max(0, 1 - t * t);
+          g.beginFill(0x080E1A, a);
+          g.drawCircle(0, 0, (winPopupGlowSize / 2) * (1 - t));
+          g.endFill();
+        }
+        winPopupGlow = g;
+      }
+      winPopupGlow.x = 0; winPopupGlow.y = 0;
+      winPopup.addChild(winPopupGlow);
+      const winPopupLbl = new PIXI.Text('WIN', {
+        fontFamily: FONT, fontSize: 18 * gs, fontWeight: '700',
+        fill: 0xFFFFFF, letterSpacing: 4,
+      });
+      winPopupLbl.anchor.set(0.5, 0);
+      winPopupLbl.x = 0;
+      winPopupLbl.y = -135 * gs;
+      winPopup.addChild(winPopupLbl);
+      const winPopupAmt = new PIXI.Text(fmtCash(0), {
+        fontFamily: FONT, fontSize: 56 * gs, fontWeight: '800',
+        fill: 0xFFD23F,
+      });
+      winPopupAmt.anchor.set(0.5, 0);
+      winPopupAmt.x = 0;
+      winPopupAmt.y = -113 * gs;     // sits just below the WIN label
+      winPopup.addChild(winPopupAmt);
+      // Position the popup centred on the GRID CENTRE — same anchor
+      // point as the REPEAT BET button. The glow halo sits behind the
+      // button; the WIN text floats above the button inside the glow.
+      winPopup.x = rbBtn.x;
+      winPopup.y = rbBtn.y;
+      winPopup.alpha = 0;
+      winPopup.visible = false;
+      winPopup.scale.set(0.7);
+      // Insert the popup BEHIND the REPEAT BET button so the dark
+      // gradient halo reads as a backdrop, not a foreground panel.
+      // The WIN texts inside winPopup live above the button area
+      // (y = -113 / -135 of grid centre) so they don't visually
+      // collide with rbBtn even though they're z-ordered behind it.
+      const _rbIdx = (scene.stage.children || []).indexOf(rbBtn);
+      if (_rbIdx >= 0 && typeof scene.stage.addChildAt === 'function') {
+        scene.stage.addChildAt(winPopup, _rbIdx);
+      } else {
+        scene.stage.addChild(winPopup);
+      }
+      scene.winPopup = { container: winPopup, amtText: winPopupAmt };
+
+      // ── Click-trap for the popup ──
+      // Fullscreen invisible rectangle that sits BETWEEN the popup
+      // backdrop (winPopup) and the REPEAT BET button. Any tap that
+      // lands on the trap (i.e. anywhere outside rbBtn while the popup
+      // is visible) dismisses both pieces. rbBtn sits above the trap
+      // so its own tap continues to fire repeatLastBets+autoSpin.
+      const popupTrap = new PIXI.Graphics();
+      popupTrap.beginFill(0x000000, 0.001);   // alpha just high enough to be hit-testable
+      popupTrap.drawRect(0, 0, L.sw, L.sh);
+      popupTrap.endFill();
+      popupTrap.eventMode = 'static';
+      popupTrap.cursor    = 'default';
+      popupTrap.visible   = false;
+      popupTrap.on('pointertap', () => {
+        hideRepeatBetButton();
+        hideWinPopup();
+      });
+      // Insert the trap just below rbBtn, so it covers everything
+      // beneath the popup chrome but rbBtn still receives its taps.
+      const _rbIdx2 = (scene.stage.children || []).indexOf(rbBtn);
+      if (_rbIdx2 >= 0 && typeof scene.stage.addChildAt === 'function') {
+        scene.stage.addChildAt(popupTrap, _rbIdx2);
+      } else {
+        scene.stage.addChild(popupTrap);
+      }
+      scene.popupTrap = popupTrap;
+
       // ── Debug RTP overlay (BB pattern). Low-contrast text near the
       // bottom edge — shows live measured RTP, spin count, hit rate.
       scene.rtpText = new PIXI.Text('RTP 0.00%  |  Spins 0', {
-        fontFamily: FONT, fontSize: 13 * gs, fill: 0xFFE0A0,
+        fontFamily: FONT, fontSize: 13 * gs, fill: 0x4A5C7A, fontWeight: '600',
       });
       scene.rtpText.anchor.set(0.5);
-      scene.rtpText.alpha = 0.55;
+      scene.rtpText.alpha = 0.7;
       scene.rtpText.x = L.sw / 2;
       scene.rtpText.y = L.sh - 18 * gs;
       scene.stage.addChild(scene.rtpText);
 
       // Per-mode scene widget hook (BB-style). Currently a no-op for
       // rush, kept so future widgets can plug in here.
-      window.RushHour.getModeDef().buildSceneFeatureWidget?.(scene, app, { L });
+      window.RushHour.getModeDef().buildSceneFeatureWidget?.(scene, app, { L, frame, gs });
 
       // Sync HUD state (gating, free-spin banner) on first paint AND every
       // rebuild so resize-during-feature still shows the correct controls.
@@ -2969,8 +4119,6 @@ Win = total paytable value × bet of every symbol that exited.`;
       };
       apply(scene.ctrlButtons.clear,  !busy && hasBets);
       apply(scene.ctrlButtons.repeat, !busy && !hasBets && hasLast);
-      apply(scene.ctrlButtons.double, !busy && hasBets);
-      apply(scene.ctrlButtons.half,   !busy && hasBets);
       // Chip selector is also locked while spinning.
       if (scene.chipBtns) {
         for (const c of scene.chipBtns) {
@@ -2990,16 +4138,17 @@ Win = total paytable value × bet of every symbol that exited.`;
     }
     function setWinDisplay(amount) {
       if (!scene.winPill || !scene.winPill.valText) return;
-      // Smooth count-up from the currently-displayed value to the target.
+      // Smooth count-up from the currently-displayed value to the
+      // target, formatted with the "WIN " prefix.
       const t = scene.winPill.valText;
       const fromVal = _readWinDisplay();
-      tweenCount(t, fromVal, amount);
+      tweenCount(t, fromVal, amount, 0.6, fmtWin);
     }
     function _readWinDisplay() {
       if (!scene.winPill || !scene.winPill.valText) return 0;
-      const txt = scene.winPill.valText.text || '$0.00';
-      // Strip $ and commas to parse.
-      const n = parseFloat(txt.replace(/[$,]/g, ''));
+      const txt = scene.winPill.valText.text || 'WIN  $0.00';
+      // Strip everything that isn't a digit / decimal point.
+      const n = parseFloat(txt.replace(/[^\d.]/g, ''));
       return isNaN(n) ? 0 : n;
     }
 
@@ -3023,10 +4172,61 @@ Win = total paytable value × bet of every symbol that exited.`;
         const stake = player.arrowBets[+pos] || 0;
         const txt = scene.arrowBetTexts[pos];
         if (txt) txt.text = stake > 0 ? fmtCashCompact(stake) : '';
-        // Spin-time dim: arrows without bets fade to ~30% alpha so the
-        // staked arrows pop visually while the round resolves.
-        const cell = scene.ringCells && scene.ringCells[pos];
-        if (cell) cell.alpha = (busy && stake === 0) ? 0.32 : 1.0;
+        // Spin-time dim. Three states for un-staked cells:
+        //   • not boosted → entire cell fades to ~30% (existing behaviour)
+        //   • boosted     → ONLY the multiplier text + indicator chevron
+        //                   stay bright; arrow + border still fade so
+        //                   the cell doesn't read as "I bet on this"
+        //   • staked      → full brightness regardless
+        const isBoosted = scene.boostedArrows && scene.boostedArrows[+pos];
+        const cell      = scene.ringCells && scene.ringCells[pos];
+        const cellBg    = scene.ringCellBgs && scene.ringCellBgs[pos];
+        const chev      = scene.arrowChevrons && scene.arrowChevrons[pos];
+        const oddsTxt   = scene.arrowOddsTexts && scene.arrowOddsTexts[pos];
+        const glow      = scene._stakeGlows && scene._stakeGlows[pos];
+        const dim       = busy && stake === 0;
+        // Staked cells get a soft pulsing yellow halo behind them.
+        if (glow) {
+          if (stake > 0) {
+            if (!glow.visible) {
+              glow.visible = true;
+              gsap.killTweensOf(glow);
+              glow.alpha = 0.55;
+              gsap.to(glow, {
+                alpha: 1.0, duration: 0.85,
+                ease: 'sine.inOut', yoyo: true, repeat: -1,
+              });
+            }
+          } else {
+            if (glow.visible) {
+              gsap.killTweensOf(glow);
+              glow.alpha = 1;
+              glow.visible = false;
+            }
+          }
+        }
+        if (cell) {
+          if (dim && isBoosted) {
+            // Container at full alpha so the multiplier + indicator can
+            // pop; bg + chevron individually dimmed.
+            cell.alpha = 1.0;
+            if (cellBg)  cellBg.alpha  = 0.32;
+            if (chev)    chev.alpha    = 0.32;
+            if (oddsTxt) oddsTxt.alpha = 1.0;
+          } else if (dim) {
+            cell.alpha = 0.32;
+            // Make sure children are at their default in case they were
+            // selectively dimmed previously and the boost cleared.
+            if (cellBg)  cellBg.alpha  = 1.0;
+            if (chev)    chev.alpha    = 1.0;
+            if (oddsTxt) oddsTxt.alpha = 1.0;
+          } else {
+            cell.alpha = 1.0;
+            if (cellBg)  cellBg.alpha  = 1.0;
+            if (chev)    chev.alpha    = 1.0;
+            if (oddsTxt) oddsTxt.alpha = 1.0;
+          }
+        }
         // Stake chip BG + trash icon only show when there's a stake.
         const chipBg = scene._stakeChipBgs && scene._stakeChipBgs[pos];
         if (chipBg) chipBg.visible = stake > 0;
@@ -3109,29 +4309,87 @@ Win = total paytable value × bet of every symbol that exited.`;
       refreshArrowBetVisuals();
       refreshHUD();
     }
-    // Round status — drives the text near the spin button.
+    // Show/hide helpers for the centre-of-grid REPEAT BET overlay.
+    function showRepeatBetButton() {
+      const btn = scene.repeatBetBtn;
+      if (!btn) return;
+      // Only meaningful if there's a last bet pattern AND the player can afford it.
+      const total = sumArrowBets(player.lastBets || {});
+      if (total <= 0) return;
+      if (total > player.balance) return;
+      btn.visible = true;
+      if (scene.popupTrap) scene.popupTrap.visible = true;
+      gsap.killTweensOf(btn);
+      gsap.killTweensOf(btn.scale);
+      gsap.fromTo(btn,       { alpha: 0 }, { alpha: 1, duration: 0.25 });
+      gsap.fromTo(btn.scale, { x: 0.85, y: 0.85 }, { x: 1, y: 1, duration: 0.40, ease: 'back.out(2.4)' });
+    }
+    function hideRepeatBetButton() {
+      const btn = scene.repeatBetBtn;
+      if (!btn || !btn.visible) return;
+      if (scene.popupTrap) scene.popupTrap.visible = false;
+      gsap.killTweensOf(btn);
+      gsap.to(btn, {
+        alpha: 0, duration: 0.18, ease: 'power2.in',
+        onComplete: () => { btn.visible = false; },
+      });
+    }
+    // End-of-round popup glow + win readout — appears whenever the
+    // REPEAT BET button is shown (every resolved round, win or lose).
+    // The glow halo always fires; the amount just shows whatever the
+    // round's win was, including $0.00 on a losing round.
+    function showWinPopup(amount) {
+      const wp = scene.winPopup;
+      if (!wp || !wp.container) return;
+      wp.amtText.text = fmtCash(amount || 0);
+      wp.container.visible = true;
+      gsap.killTweensOf(wp.container);
+      gsap.killTweensOf(wp.container.scale);
+      gsap.fromTo(wp.container,       { alpha: 0 }, { alpha: 1, duration: 0.30, ease: 'power2.out' });
+      gsap.fromTo(wp.container.scale, { x: 0.7, y: 0.7 }, { x: 1, y: 1, duration: 0.55, ease: 'back.out(2.0)' });
+    }
+    function hideWinPopup() {
+      const wp = scene.winPopup;
+      if (!wp || !wp.container || !wp.container.visible) return;
+      gsap.killTweensOf(wp.container);
+      gsap.to(wp.container, {
+        alpha: 0, duration: 0.18, ease: 'power2.in',
+        onComplete: () => { wp.container.visible = false; },
+      });
+    }
+    // Round status — drives the text near the spin button. Also gates
+    // the centre-of-grid REPEAT BET overlay + the popup glow. The glow
+    // fires together with REPEAT BET on every resolved round, regardless
+    // of outcome — losing rounds get the same halo with $0.00 readout.
     function setRoundStatus(state, info = {}) {
       roundStatus = state;
       scene._lastStatusInfo = info;
       refreshRoundStatusText();
+      if (state === 'won' || state === 'lost') {
+        showRepeatBetButton();
+        showWinPopup((info && info.amount) || 0);
+      } else {
+        hideRepeatBetButton();
+        hideWinPopup();
+      }
     }
     function refreshRoundStatusText() {
       if (!scene.statusText) return;
       let text = '';
-      let fill = 0xFFECB3;
+      let fill = 0xFFFFFF;
       switch (roundStatus) {
         case 'spinning':
-          text = 'ROLLING…';
-          fill = 0xC9A24A;
+          text = 'UNJAMMING…';
+          fill = 0xFFD23F;
           break;
         default:
           // 'idle' / 'won' / 'lost' all show the bet-phase prompt — the
           // round outcome is already on the WIN pill (count-up + pulse),
           // so this row is just the narrative for what to do NEXT.
           if (sumArrowBets(player.arrowBets) > 0) {
-            text = 'READY TO PLAY'; fill = 0xC9A24A;
+            text = 'READY TO PLAY'; fill = 0xFFD23F;
           } else {
-            text = 'PLACE YOUR BETS'; fill = 0xFFE082;
+            text = 'PLACE YOUR BETS'; fill = 0xFFFFFF;
           }
       }
       scene.statusText.text = text;
@@ -3317,7 +4575,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         cont.addChild(ring);
         const txt = new PIXI.Text(`×0`, {
           fontFamily: FONT, fontSize: L.cellSize * 0.85,
-          fill: 0xFFD54F, stroke: 0x2A1808, strokeThickness: 6 * gs,
+          fill: 0xFFD54F,
           fontWeight: 'bold',
         });
         txt.anchor.set(0.5);
@@ -3397,7 +4655,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         const target = this._chargedMultBadgePos;
         const flier = new PIXI.Text(`×${value}`, {
           fontFamily: FONT, fontSize: L.cellSize * 0.55,
-          fill: 0xFFD54F, stroke: 0x2A1808, strokeThickness: 5 * gs,
+          fill: 0xFFD54F,
           fontWeight: 'bold',
         });
         flier.anchor.set(0.5);
@@ -3449,7 +4707,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         const baseAmount = (ev.baseAmount || 0) * player.bet;
         const winFlier = new PIXI.Text(`+${fmtCash(baseAmount)}`, {
           fontFamily: FONT, fontSize: L.cellSize * 0.50,
-          fill: 0xFFE082, stroke: 0x2A1808, strokeThickness: 5 * gs,
+          fill: 0xFFE082,
           fontWeight: 'bold',
         });
         winFlier.anchor.set(0.5);
@@ -3480,7 +4738,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         const total = baseAmount + (ev.bonusAmount || 0) * player.bet;
         const result = new PIXI.Text(fmtCash(total), {
           fontFamily: FONT, fontSize: L.cellSize * 0.95,
-          fill: 0xFFE082, stroke: 0x2A1808, strokeThickness: 7 * gs,
+          fill: 0xFFE082,
           fontWeight: 'bold',
         });
         result.anchor.set(0.5);
@@ -3530,7 +4788,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         this._stopChargeLoops(badge);
         const fizzle = new PIXI.Text('FIZZLE', {
           fontFamily: FONT, fontSize: L.cellSize * 0.42,
-          fill: 0xE8786C, stroke: 0x2A1808, strokeThickness: 5 * gs,
+          fill: 0xE8786C,
           fontWeight: 'bold', letterSpacing: 1.5,
         });
         fizzle.anchor.set(0.5);
@@ -4053,12 +5311,249 @@ Win = total paytable value × bet of every symbol that exited.`;
         if (tweens.length) await Promise.all(tweens);
       }
 
+      // Build a single multiplier badge — gold-bordered pill with
+      // colour-tiered fill that pops against the cell. Used both as
+      // the flying badge and the sticky boost marker.
+      _makeBoostBadge(multiplier) {
+        const cont = new PIXI.Container();
+        const v = multiplier;
+        // Tiered fill: small (<=10) gold, medium (<=100) orange, big purple.
+        const tier = v >= 500 ? 'big' : (v >= 25 ? 'mid' : 'low');
+        const fillCol = tier === 'big' ? 0x7C3AED : (tier === 'mid' ? 0xFF6B2C : 0xFFD23F);
+        const borderCol = tier === 'big' ? 0xC9A8FF : (tier === 'mid' ? 0xFFC9A8 : 0xFFE082);
+        const txtCol = tier === 'big' ? 0xFFFFFF : 0x2A1808;
+        const w = 56, h = 28;
+        const bg = new PIXI.Graphics();
+        bg.lineStyle(2, borderCol, 1);
+        bg.beginFill(fillCol, 1);
+        bg.drawRoundedRect(-w / 2, -h / 2, w, h, h * 0.5);
+        bg.endFill();
+        cont.addChild(bg);
+        const t = new PIXI.Text(`${v}x`, {
+          fontFamily: FONT, fontSize: 14, fontWeight: '800',
+          fill: txtCol,
+        });
+        t.anchor.set(0.5);
+        cont.addChild(t);
+        cont._tier = tier;
+        return cont;
+      }
+      // Officer multiplier flies from corner → target arrow, lands ON
+      // the multiplier text, then BAKES into the displayed value
+      //   (e.g. 2.2x with a ×2 boost → 4.4x).
+      // The flying badge fades after impact; only the boosted multi
+      // text remains until the round ends.
+      async _playOfficerBoosts(fired) {
+        if (!fired || fired.length === 0) return;
+        scene.boostFliers = scene.boostFliers || [];
+        scene.boostedArrows = scene.boostedArrows || {}; // ringPos → original text style snapshot
+        const flights = [];
+        for (const f of fired) {
+          const officer = scene.officers && scene.officers[f.corner];
+          if (!officer) continue;
+          const start = officer._cornerCenter;
+          const targetCell = scene.ringCells && scene.ringCells[f.ringPos];
+          if (!targetCell) continue;
+          const oddsTxt = scene.arrowOddsTexts && scene.arrowOddsTexts[f.ringPos];
+          // Land at the multiplier text's screen position.
+          const end = oddsTxt
+            ? { x: targetCell.x + oddsTxt.x, y: targetCell.y + oddsTxt.y }
+            : { x: targetCell.x, y: targetCell.y };
+          // Officer "salutes" — bigger windup before the throw.
+          gsap.timeline()
+            .to(officer.scale, { x: 1.22, y: 1.22, duration: 0.30, ease: 'back.out(2.4)' }, 0)
+            .to(officer.scale, { x: 1.00, y: 1.00, duration: 0.55, ease: 'elastic.out(1.4, 0.4)' }, 0.30);
+          // Flying badge spawn at officer.
+          const badge = this._makeBoostBadge(f.multiplier);
+          badge.x = start.x; badge.y = start.y;
+          badge.alpha = 0;
+          badge.scale.set(0.4);
+          scene.fxLayer.addChild(badge);
+          scene.boostFliers.push(badge);
+          // Arc flight — taller arc + slower flight so the throw reads
+          // as a deliberate gesture, not a flash.
+          const midX = (start.x + end.x) / 2;
+          const midY = Math.min(start.y, end.y) - 110;
+          const path = { t: 0 };
+          flights.push(new Promise(res => {
+            const tl = gsap.timeline({ onComplete: () => res() });
+            tl.to(badge,       { alpha: 1, duration: 0.30, ease: 'power2.out' }, 0);
+            tl.to(badge.scale, { x: 1, y: 1, duration: 0.45, ease: 'back.out(2.4)' }, 0);
+            // Slight badge spin during the flight — 2 full turns so the
+            // badge lands flat (readable orientation) at the end of the arc.
+            tl.to(badge,       { rotation: Math.PI * 2, duration: 1.10, ease: 'power1.inOut' }, 0.15);
+            tl.to(path, {
+              t: 1, duration: 1.10, ease: 'power2.inOut',
+              onUpdate: () => {
+                const u = 1 - path.t;
+                badge.x = u * u * start.x + 2 * u * path.t * midX + path.t * path.t * end.x;
+                badge.y = u * u * start.y + 2 * u * path.t * midY + path.t * path.t * end.y;
+              },
+            }, 0.15);
+            // On impact — full hit treatment:
+            //   1) yellow flash burst at the impact point
+            //   2) cell shake (whole cell wobbles)
+            //   3) odds text bounces (overshoot scale, elastic settle)
+            //   4) value count-ups (old → boosted) so the player sees
+            //      the multiplier visibly EAT the existing value
+            tl.call(() => {
+              if (!oddsTxt) return;
+              const cellCont = targetCell;
+
+              // Capture the value currently shown so the count-up
+              // starts from whatever's already there (handles stacking
+              // when a second officer hits an already-boosted arrow).
+              const oldShown = parseFloat(oddsTxt.text) || arrowOddsFor(f.ringPos);
+              if (!scene.boostedArrows[f.ringPos]) {
+                scene.boostedArrows[f.ringPos] = {
+                  text: oddsTxt.text,
+                  fill: oddsTxt.style.fill,
+                  fontSize: oddsTxt.style.fontSize,
+                };
+              }
+              const boosted = oldShown * f.multiplier;
+
+              // 1) Impact flash — radial burst that expands and fades.
+              const flash = new PIXI.Graphics();
+              flash.beginFill(0xFFD23F, 0.9);
+              flash.drawCircle(0, 0, L.cellSize * 0.18);
+              flash.endFill();
+              flash.x = end.x; flash.y = end.y;
+              flash.scale.set(0.4);
+              scene.fxLayer.addChild(flash);
+              gsap.timeline({ onComplete: () => { try { flash.destroy(); } catch (e) {} } })
+                .to(flash.scale, { x: 2.6, y: 2.6, duration: 0.45, ease: 'power2.out' }, 0)
+                .to(flash,       { alpha: 0,        duration: 0.45, ease: 'power2.out' }, 0);
+
+              // 2) Cell shake — short damped horizontal wobble.
+              const _gs = (L && L.gameScale) || 1;
+              const baseX = cellCont.x;
+              gsap.killTweensOf(cellCont, 'x');
+              gsap.timeline({ onComplete: () => { cellCont.x = baseX; } })
+                .to(cellCont, { x: baseX + 6 * _gs, duration: 0.05, ease: 'power2.out' })
+                .to(cellCont, { x: baseX - 6 * _gs, duration: 0.07, ease: 'power2.inOut' })
+                .to(cellCont, { x: baseX + 4 * _gs, duration: 0.06, ease: 'power2.inOut' })
+                .to(cellCont, { x: baseX - 2 * _gs, duration: 0.06, ease: 'power2.inOut' })
+                .to(cellCont, { x: baseX,           duration: 0.06, ease: 'power2.out' });
+
+              // 3) Text bounces big — bright lime fill, no muddying
+              // stroke. Stays at 1.18× baseline scale so it's visibly
+              // louder than the unboosted siblings.
+              oddsTxt.style.fill = 0x6FFFA0;
+              oddsTxt.style.stroke = 0;
+              oddsTxt.style.strokeThickness = 0;
+              oddsTxt.style.fontWeight = '900';
+              gsap.killTweensOf(oddsTxt.scale);
+              gsap.fromTo(oddsTxt.scale,
+                { x: 1.95, y: 1.95 },
+                { x: 1.18, y: 1.18, duration: 0.70, ease: 'elastic.out(1.6, 0.4)' });
+
+              // 3b) Side indicator — small green up-chevron pinned
+              // RIGHT NEXT TO the multiplier text so the two read as
+              // a single composite glyph. Position is recomputed
+              // dynamically against oddsTxt.width during the count-up
+              // (text grows as the value counts up; chevron tracks it
+              // so the gap stays constant).
+              const aSize = L.cellSize * 0.06;
+              const indPad = 4 * _gs;
+              const positionIndicator = () => {
+                const ind = scene.boostedArrows[f.ringPos] && scene.boostedArrows[f.ringPos]._indicator;
+                if (!ind) return;
+                // oddsTxt.width is the visible (scale-applied) text width.
+                ind.x = -(oddsTxt.width / 2) - aSize - indPad;
+              };
+              if (!scene.boostedArrows[f.ringPos]._indicator) {
+                const ind = new PIXI.Graphics();
+                ind.lineStyle(1.2 * _gs, 0x065F46, 1);
+                ind.beginFill(0x10B981, 1);
+                ind.drawPolygon([
+                  0,        -aSize,
+                  aSize,     aSize * 0.55,
+                  aSize * 0.35,  aSize * 0.55,
+                  aSize * 0.35,  aSize,
+                  -aSize * 0.35, aSize,
+                  -aSize * 0.35, aSize * 0.55,
+                  -aSize,    aSize * 0.55,
+                ]);
+                ind.endFill();
+                ind.y = L.cellSize * 0.32;
+                cellCont.addChild(ind);
+                scene.boostedArrows[f.ringPos]._indicator = ind;
+                gsap.fromTo(ind.scale,
+                  { x: 0, y: 0 },
+                  { x: 1, y: 1, duration: 0.45, ease: 'back.out(2.4)', delay: 0.10 });
+              }
+
+              // 4) Value count-up — keep .toFixed(1) so the displayed
+              // text stays in 1.8x / 3.6x territory. Chevron x is
+              // re-anchored against the text on every tick so the
+              // [▲ 3.6x] composite stays tight as the value grows.
+              const counter = { v: oldShown };
+              gsap.killTweensOf(counter);
+              positionIndicator();
+              gsap.to(counter, {
+                v: boosted, duration: 0.55, ease: 'power2.out',
+                onUpdate: () => {
+                  oddsTxt.text = counter.v.toFixed(1) + 'x';
+                  positionIndicator();
+                },
+                onComplete: () => {
+                  oddsTxt.text = boosted.toFixed(1) + 'x';
+                  positionIndicator();
+                },
+              });
+
+              // 5) The cell's spin-time dim is keyed on stake==0, but a
+              // boost makes us care about this arrow even unstaked.
+              // Re-run the visual refresher so the cell pops back to
+              // full brightness even mid-spin.
+              if (typeof refreshArrowBetVisuals === 'function') {
+                refreshArrowBetVisuals();
+              }
+            }, null, 1.25);
+            tl.to(badge,       { alpha: 0, duration: 0.30, ease: 'power2.in' },  1.30);
+            tl.to(badge.scale, { x: 1.5, y: 1.5, duration: 0.30, ease: 'power2.out' }, 1.30);
+          }));
+        }
+        await Promise.all(flights);
+      }
+      // Restore the original multiplier text on every boosted arrow,
+      // and clean up any in-flight badges that didn't finish.
+      _clearOfficerBoosts() {
+        if (scene.boostedArrows) {
+          for (const pos in scene.boostedArrows) {
+            const snap = scene.boostedArrows[pos];
+            const oddsTxt = scene.arrowOddsTexts && scene.arrowOddsTexts[pos];
+            if (oddsTxt && snap) {
+              oddsTxt.text = snap.text;
+              if (snap.fill !== undefined)     oddsTxt.style.fill     = snap.fill;
+              if (snap.fontSize !== undefined) oddsTxt.style.fontSize = snap.fontSize;
+              // Strip the boosted decoration (stroke, weight bump, scale).
+              oddsTxt.style.stroke = 0;
+              oddsTxt.style.strokeThickness = 0;
+              oddsTxt.style.fontWeight = '800';
+              gsap.killTweensOf(oddsTxt.scale);
+              oddsTxt.scale.set(1);
+            }
+            // Destroy the green chevron indicator if one was added.
+            if (snap && snap._indicator) {
+              try { snap._indicator.destroy({ children: true }); } catch (e) {}
+            }
+          }
+        }
+        scene.boostedArrows = {};
+        if (scene.boostFliers) {
+          for (const b of scene.boostFliers) {
+            try { b.destroy({ children: true }); } catch (e) {}
+          }
+          scene.boostFliers = [];
+        }
+      }
       _spawnPayText(x, y, amount, big = false) {
         const t = new PIXI.Text(`+${fmtCash(amount)}`, {
           fontFamily: FONT,
           fontSize: (big ? 38 : 26) * L.gameScale,
           fill: big ? 0xFFD54F : 0x6FA8C2,
-          stroke: 0x2A1808, strokeThickness: 5 * L.gameScale,
           fontWeight: 'bold',
         });
         t.anchor.set(0.5); t.x = x; t.y = y; t.alpha = 0;
@@ -4069,6 +5564,253 @@ Win = total paytable value × bet of every symbol that exited.`;
           .to(t.scale, { x: 1, y: 1, duration: 0.32, ease: 'back.out(2.4)' }, 0)
           .to(t,       { y: y - 70 * L.gameScale, duration: 1.10, ease: 'power2.out' }, 0.18)
           .to(t,       { alpha: 0, duration: 0.30, ease: 'power2.in' }, 1.05);
+      }
+      // Cash scatter — small green dollar-BILL rectangles bursting
+      // outward from the exit point in all directions and settling
+      // close to where they land. Each particle stays near the spawn
+      // position (short travel) so the burst doesn't drift visually
+      // along with the upward-flying pay text.
+      _spawnCashScatter(x, y, count = 8) {
+        const layer = scene.fxLayer;
+        if (!layer) return;
+        const _gs = L.gameScale || 1;
+        for (let i = 0; i < count; i++) {
+          // Build the bill: rounded green rectangle with a subtle
+          // darker border and a centred "$" so it reads as cash.
+          const bill = new PIXI.Container();
+          const bw = (15 + Math.random() * 6) * _gs;
+          const bh = bw * 0.55;
+          const billBg = new PIXI.Graphics();
+          billBg.lineStyle(1 * _gs, 0x065F46, 1);
+          billBg.beginFill(0x10B981, 1);
+          billBg.drawRoundedRect(-bw / 2, -bh / 2, bw, bh, 1.6 * _gs);
+          billBg.endFill();
+          // Tiny inner highlight stripe — gives the bill some dimension.
+          billBg.lineStyle(0.6 * _gs, 0x34D399, 0.8);
+          billBg.drawRoundedRect(
+            -bw / 2 + 1.5 * _gs, -bh / 2 + 1.5 * _gs,
+            bw - 3 * _gs, bh - 3 * _gs, 1 * _gs
+          );
+          bill.addChild(billBg);
+          const sym = new PIXI.Text('$', {
+            fontFamily: FONT,
+            fontSize: bh * 0.78,
+            fill: 0xE8F5EC,
+            fontWeight: '900',
+          });
+          sym.anchor.set(0.5);
+          bill.addChild(sym);
+
+          bill.x = x; bill.y = y;
+          // Full 360° scatter — no upward bias.
+          const angle = Math.random() * Math.PI * 2;
+          const dist  = (28 + Math.random() * 55) * _gs;
+          const tx = x + Math.cos(angle) * dist;
+          const ty = y + Math.sin(angle) * dist;
+          // Slight rotation so each bill tumbles to a unique resting
+          // angle.
+          const rot = (Math.random() - 0.5) * Math.PI * 0.6;
+          const dur = 0.45 + Math.random() * 0.25;
+          layer.addChild(bill);
+          gsap.timeline({ onComplete: () => { try { bill.destroy({ children: true }); } catch (e) {} } })
+            .to(bill, {
+              x: tx, y: ty, rotation: rot,
+              duration: dur, ease: 'power3.out',
+            }, 0)
+            .to(bill, {
+              alpha: 0, duration: 0.35, ease: 'power2.in',
+            }, dur * 0.55);
+        }
+      }
+      // Total-clearance celebration — fires when every car on the grid
+      // exits in a single round. Full-screen "CLEAR!" headline + the
+      // bonus amount + a YAY! button + falling confetti / dollar bills.
+      //
+      // RETURNS a Promise that resolves when the player taps YAY!. The
+      // caller awaits it before showing the regular end-of-round popup
+      // so the two dialogs don't overlap.
+      _celebrateClearance(bonusAmount) {
+        return new Promise(resolve => this._celebrateClearanceInner(bonusAmount, resolve));
+      }
+      _celebrateClearanceInner(bonusAmount, onDismiss) {
+        if (!scene.stage) { onDismiss(); return; }
+        const _gs = L.gameScale || 1;
+        const sw = L.sw, sh = L.sh;
+        // Dedicated layer — appended last so it's the topmost child
+        // of the stage. Children added to it stack in insertion order
+        // (confetti/bills first, then headline/bonus on top).
+        const fx = new PIXI.Container();
+        scene.stage.addChild(fx);
+        // Track the longest celebration duration so we can clean up
+        // the layer after it's done.
+        let maxDur = 0;
+
+        // 1) CONFETTI — added first so headline/bonus sit on top of it.
+        const confettiCount = 80;
+        const confettiPalette = [0xFF6B35, 0xFFD23F, 0x10B981, 0xE63946, 0x3897F0, 0xE84A8A, 0x8E4FE3];
+        for (let i = 0; i < confettiCount; i++) {
+          const c = new PIXI.Graphics();
+          const cw = (8 + Math.random() * 7) * _gs;
+          const ch = (4 + Math.random() * 5) * _gs;
+          const color = confettiPalette[Math.floor(Math.random() * confettiPalette.length)];
+          c.beginFill(color, 1);
+          c.drawRect(-cw / 2, -ch / 2, cw, ch);
+          c.endFill();
+          c.x = Math.random() * sw;
+          c.y = -30 - Math.random() * 50;
+          c.rotation = Math.random() * Math.PI * 2;
+          fx.addChild(c);
+          const startDelay = Math.random() * 0.6;
+          const fallDur = 2.0 + Math.random() * 1.5;
+          const drift   = (Math.random() - 0.5) * 200 * _gs;
+          const spin    = (Math.random() - 0.5) * Math.PI * 6;
+          maxDur = Math.max(maxDur, startDelay + fallDur);
+          gsap.timeline()
+            .to(c, {
+              y: sh + 60, x: c.x + drift, rotation: c.rotation + spin,
+              duration: fallDur, ease: 'power1.in',
+            }, startDelay)
+            .to(c, { alpha: 0, duration: 0.30 }, startDelay + fallDur - 0.10);
+        }
+
+        // 2) DOLLAR BILLS — bigger green rectangles with $ glyph.
+        const billCount = 30;
+        for (let i = 0; i < billCount; i++) {
+          const bill = new PIXI.Container();
+          const bw = (24 + Math.random() * 14) * _gs;
+          const bh = bw * 0.55;
+          const billBg = new PIXI.Graphics();
+          billBg.lineStyle(1 * _gs, 0x065F46, 1);
+          billBg.beginFill(0x10B981, 1);
+          billBg.drawRoundedRect(-bw / 2, -bh / 2, bw, bh, 1.6 * _gs);
+          billBg.endFill();
+          billBg.lineStyle(0.6 * _gs, 0x34D399, 0.8);
+          billBg.drawRoundedRect(-bw / 2 + 1.5 * _gs, -bh / 2 + 1.5 * _gs, bw - 3 * _gs, bh - 3 * _gs, 1 * _gs);
+          bill.addChild(billBg);
+          const sym = new PIXI.Text('$', {
+            fontFamily: FONT, fontSize: bh * 0.78,
+            fill: 0xE8F5EC, fontWeight: '900',
+          });
+          sym.anchor.set(0.5);
+          bill.addChild(sym);
+          bill.x = Math.random() * sw;
+          bill.y = -50 - Math.random() * 80;
+          bill.rotation = (Math.random() - 0.5) * 0.7;
+          fx.addChild(bill);
+          const startDelay = Math.random() * 0.7;
+          const fallDur = 2.4 + Math.random() * 1.6;
+          const drift   = (Math.random() - 0.5) * 220 * _gs;
+          const spin    = (Math.random() - 0.5) * Math.PI * 4;
+          maxDur = Math.max(maxDur, startDelay + fallDur);
+          gsap.timeline()
+            .to(bill, {
+              y: sh + 80, x: bill.x + drift, rotation: bill.rotation + spin,
+              duration: fallDur, ease: 'power1.in',
+            }, startDelay)
+            .to(bill, { alpha: 0, duration: 0.40 }, startDelay + fallDur - 0.20);
+        }
+
+        // 3) HEADLINE — big yellow "CLEAR!" — added AFTER confetti so
+        // it renders on top of the falling pieces. Holds in place
+        // (gentle infinite pulse) until YAY is pressed.
+        const headline = new PIXI.Text('CLEAR!', {
+          fontFamily: FONT, fontSize: 110 * _gs,
+          fill: 0xFFD23F, fontWeight: '900',
+          letterSpacing: 10,
+        });
+        headline.anchor.set(0.5);
+        headline.x = sw / 2;
+        headline.y = sh / 2 - 60 * _gs;
+        headline.alpha = 0;
+        headline.scale.set(0.4);
+        fx.addChild(headline);
+        gsap.timeline()
+          .to(headline,       { alpha: 1, duration: 0.20, ease: 'power2.out' }, 0)
+          .to(headline.scale, { x: 1, y: 1, duration: 0.45, ease: 'back.out(2.4)' }, 0);
+        // Gentle indefinite pulse — killed when fx tears down on YAY.
+        gsap.to(headline.scale, {
+          x: 1.06, y: 1.06, duration: 0.55,
+          yoyo: true, repeat: -1, ease: 'sine.inOut', delay: 0.55,
+        });
+
+        // 4) Bonus readout — only the cleanup bonus, NOT the round
+        // total. Holds visible until dismissal.
+        const bonusTxt = new PIXI.Text(`+ ${fmtCash(bonusAmount)}`, {
+          fontFamily: FONT, fontSize: 56 * _gs,
+          fill: 0xFFFFFF, fontWeight: '900',
+          letterSpacing: 4,
+        });
+        bonusTxt.anchor.set(0.5);
+        bonusTxt.x = sw / 2;
+        bonusTxt.y = sh / 2 + 30 * _gs;
+        bonusTxt.alpha = 0;
+        bonusTxt.scale.set(0.6);
+        fx.addChild(bonusTxt);
+        gsap.timeline()
+          .to(bonusTxt,       { alpha: 1, duration: 0.25, ease: 'power2.out' }, 0.30)
+          .to(bonusTxt.scale, { x: 1, y: 1, duration: 0.40, ease: 'back.out(2)' }, 0.30);
+
+        // 5) TAKE WIN button — emerald green pill, appears with a
+        // small delay so the headline + bonus land first.
+        const yayW = 240 * _gs, yayH = 64 * _gs;
+        const yayBtn = new PIXI.Container();
+        yayBtn.x = sw / 2;
+        yayBtn.y = sh / 2 + 140 * _gs;
+        yayBtn.alpha = 0;
+        yayBtn.scale.set(0.6);
+        const yayBg = new PIXI.Graphics();
+        const drawYay = (hover = false) => {
+          yayBg.clear();
+          yayBg.lineStyle(2 * _gs, 0x065F46, 1);
+          yayBg.beginFill(hover ? 0x34D399 : 0x10B981, 1);
+          yayBg.drawRoundedRect(-yayW / 2, -yayH / 2, yayW, yayH, 16 * _gs);
+          yayBg.endFill();
+        };
+        drawYay(false);
+        yayBtn.addChild(yayBg);
+        const yayLbl = new PIXI.Text('TAKE WIN', {
+          fontFamily: FONT, fontSize: 24 * _gs,
+          fill: 0xFFFFFF, fontWeight: '900', letterSpacing: 4,
+        });
+        yayLbl.anchor.set(0.5);
+        yayBtn.addChild(yayLbl);
+        yayBtn.eventMode = 'static';
+        yayBtn.cursor = 'pointer';
+        yayBtn.hitArea = new PIXI.Rectangle(-yayW / 2, -yayH / 2, yayW, yayH);
+        yayBtn.on('pointerover', () => { drawYay(true);  gsap.to(yayBtn.scale, { x: 1.05, y: 1.05, duration: 0.12 }); });
+        yayBtn.on('pointerout',  () => { drawYay(false); gsap.to(yayBtn.scale, { x: 1, y: 1, duration: 0.12 }); });
+        let dismissed = false;
+        const dismiss = () => {
+          if (dismissed) return;
+          dismissed = true;
+          // Kill all in-flight tweens on the layer + its children so
+          // pulses / falls don't fight the fade-out.
+          try { gsap.killTweensOf(fx); } catch (e) {}
+          if (fx.children) {
+            for (const child of fx.children) {
+              try { gsap.killTweensOf(child); } catch (e) {}
+              if (child.scale) { try { gsap.killTweensOf(child.scale); } catch (e) {} }
+            }
+          }
+          gsap.to(fx, {
+            alpha: 0, duration: 0.30, ease: 'power2.in',
+            onComplete: () => {
+              try { fx.destroy({ children: true }); } catch (e) {}
+              if (typeof onDismiss === 'function') onDismiss();
+            },
+          });
+        };
+        yayBtn.on('pointertap', dismiss);
+        fx.addChild(yayBtn);
+        gsap.fromTo(yayBtn,       { alpha: 0 }, { alpha: 1, duration: 0.35, delay: 1.0, ease: 'power2.out' });
+        gsap.fromTo(yayBtn.scale, { x: 0.6, y: 0.6 }, { x: 1, y: 1, duration: 0.50, delay: 1.0, ease: 'back.out(2.4)' });
+
+        // 6) Stage shake to punctuate the moment.
+        if (typeof shakeStage === 'function') {
+          shakeStage(10 * _gs, 0.55);
+        }
+        // (No setTimeout teardown — dismissal is gated on YAY.)
+        void maxDur;
       }
 
       // Show + pay + pop a single cluster end-to-end. Returns a Promise
@@ -4371,7 +6113,7 @@ Win = total paytable value × bet of every symbol that exited.`;
           // Tier nameplate floats up, then the cash payout flies up.
           const label = new PIXI.Text(tierTxt, {
             fontFamily: FONT, fontSize: 44 * gs,
-            fill: color, stroke: 0x2A1808, strokeThickness: 6 * gs,
+            fill: color,
             fontWeight: 'bold',
           });
           label.anchor.set(0.5);
@@ -4822,7 +6564,7 @@ Win = total paytable value × bet of every symbol that exited.`;
         const padX = 28 * gs, padY = 14 * gs;
         const tt = new PIXI.Text(text, {
           fontFamily: FONT, fontSize: 32 * gs,
-          fill: 0xFFECB3, stroke: 0x2A1808, strokeThickness: 5 * gs,
+          fill: 0xFFECB3,
           fontWeight: 'bold', letterSpacing: 1.5,
         });
         tt.anchor.set(0.5);
@@ -4945,7 +6687,82 @@ Win = total paytable value × bet of every symbol that exited.`;
         const HOP_DUR = 0.16;
         const EXIT_DUR = 0.32;
         const STEP_DELAY = 70;   // ms between consecutive moves
-        for (const m of moves) {
+
+        // Per-tick traffic-light update. Lights are now per-CELL (not
+        // per interior corner): each cell has 4 arm cones (N/E/S/W)
+        // that show whether the car in that cell will move in that
+        // direction.
+        //   green   = this cell's car is moving in that arm THIS tick
+        //   yellow  = this cell's car will move in that arm later in
+        //             the pass (queued, not its turn yet)
+        //   red     = no traffic in that arm this pass
+        //   trail   = handled inside applyArmState — when an arm
+        //             transitions from green to non-green, gsap fades
+        //             the green cone to alpha 0 over ~450ms before
+        //             snapping to the new state. Gives the player a
+        //             motion-history afterglow.
+        const armDirForArrow = { up: 0, right: 1, down: 2, left: 3 };
+        const _COLS = (window.RushHour && window.RushHour.GAME && window.RushHour.GAME.COLS) || 4;
+        const updateLights = (currentMoveIdx) => {
+          if (!scene._trafficCells) return;
+          // Per-cell-per-arm target state.
+          //   • Cells with NO car / no move this pass → all 4 arms 'dim'
+          //     (alpha 0 = off). The grid stays calm where nothing's
+          //     happening.
+          //   • Cells with at least one move/exit this pass → 'red' on
+          //     the non-moving arms (visible context: this cell's car
+          //     isn't going that way), then 'green' on the current
+          //     move's arm and 'yellow' on queued moves' arms.
+          const targets = scene._trafficCells.map(() => ['dim', 'dim', 'dim', 'dim']);
+          // Mark cells whose car is STILL going to move (or exit) at
+          // or after the current tick. Cars that already moved leave
+          // their source cell empty, so its lights should go off.
+          for (let mi = currentMoveIdx >= 0 ? currentMoveIdx : 0; mi < moves.length; mi++) {
+            const m = moves[mi];
+            if (!m) continue;
+            if (m.kind !== 'move' && m.kind !== 'exit') continue;
+            const idx = m.from.r * _COLS + m.from.c;
+            if (targets[idx]) targets[idx] = ['red', 'red', 'red', 'red'];
+          }
+          // Overlay green/yellow for actual move arms (exits don't fire
+          // a directional arm since edge cells' outward arms are null).
+          for (let mi = currentMoveIdx >= 0 ? currentMoveIdx : 0; mi < moves.length; mi++) {
+            const m = moves[mi];
+            if (!m || m.kind !== 'move') continue;
+            const arm = armDirForArrow[m.arrow];
+            if (arm == null) continue;
+            const idx = m.from.r * _COLS + m.from.c;
+            const cur = targets[idx];
+            if (!cur) continue;
+            if (mi === currentMoveIdx) cur[arm] = 'green';
+            else if (cur[arm] !== 'green') cur[arm] = 'yellow';
+          }
+          // Apply each arm's target. applyArmState handles green→fade.
+          // Skip null arms (edges that face the outer conveyor exits).
+          for (let i = 0; i < scene._trafficCells.length; i++) {
+            const tc = scene._trafficCells[i];
+            const t = targets[i];
+            for (let d = 0; d < 4; d++) {
+              const arm = tc.arms[d];
+              if (!arm) continue;
+              if (arm.state !== t[d]) {
+                scene._applyArmState(arm, t[d]);
+              }
+            }
+          }
+        };
+        // Initial state for the pass — all upcoming arms yellow, rest red.
+        if (typeof TRAFFIC_LIGHTS_ENABLED !== 'undefined' && TRAFFIC_LIGHTS_ENABLED) {
+          updateLights(-1);
+        }
+
+        for (let mi = 0; mi < moves.length; mi++) {
+          const m = moves[mi];
+          // Mark this move as the active "their turn" before the
+          // animation starts.
+          if (typeof TRAFFIC_LIGHTS_ENABLED !== 'undefined' && TRAFFIC_LIGHTS_ENABLED) {
+            updateLights(mi);
+          }
           if (m.kind === 'move') {
             const src = scene.symbols[m.from.r][m.from.c];
             if (!src) { await this._wait(STEP_DELAY); continue; }
@@ -4989,7 +6806,9 @@ Win = total paytable value × bet of every symbol that exited.`;
             // the grid is when the player should see their stake on this
             // arrow pay out.
             if (typeof this.onRushExit === 'function' && m.ringPos != null) {
-              this.onRushExit(m.ringPos, fromCtr);
+              // Pass the car's color name so the resolver can apply
+              // the per-car payMult.
+              this.onRushExit(m.ringPos, fromCtr, m.color);
             }
             // Sequential exit animation — await it so the next move can't
             // start sliding INTO the cell while a car is still mid-exit
@@ -5014,6 +6833,8 @@ Win = total paytable value × bet of every symbol that exited.`;
           }
           await this._wait(STEP_DELAY);
         }
+        // End of pass — fade arms to dim until the next pass relights them.
+        if (scene.setTrafficAllDim) scene.setTrafficAllDim();
       }
 
       // ── Rush Hour: gravity refill ─────────────────────────────────────
@@ -5201,23 +7022,55 @@ Win = total paytable value × bet of every symbol that exited.`;
       refreshHUD();
       refreshArrowBetVisuals();   // dim no-bet arrows for the round
 
+      // Roll the round's bonus boosts ONCE, before cars run. The
+      // base mode returns empty {boosts: {}, fired: []}; the officer
+      // mode returns real per-arrow multipliers. The per-exit
+      // resolver reads boosts[ringPos] regardless.
+      const { boosts: roundBoosts, fired: officersFired } =
+        getModeDef().rollRoundBoosts(player.bet);
+
       // Per-exit bet resolution — every car that visibly exits through
-      // a staked arrow pays stake × odds. Multiple exits at the same
-      // slot in one round each pay separately.
+      // a staked arrow pays:
+      //     stake × arrow odds × car payMult × officer boost (if any)
+      // The per-car factor lets a 4-car spawn distribution drive the
+      // long-run RTP: avg payMult ≈ 0.445 against flat 4× / 5× odds
+      // gives ~95% RTP without leaning on per-arrow tuning.
       let totalWin = 0;
-      animator.onRushExit = (ringPos, atPt) => {
+      animator.onRushExit = (ringPos, atPt, colorName) => {
         const stake = placedBets[ringPos];
         if (!stake) return;
-        const win = stake * arrowOddsFor(ringPos);
+        const boost = roundBoosts[ringPos] || 1;
+        const carDef = colorName && COLOR_BY_NAME[colorName];
+        const carMult = (carDef && typeof carDef.payMult === 'number')
+          ? carDef.payMult
+          : 1;
+        const win = stake * arrowOddsFor(ringPos) * boost * carMult;
         totalWin += win;
         player.balance += win;
         animator._addToRunningWin(win);
         if (atPt) {
           animator._spawnPayText(atPt.x, atPt.y, win, win >= 5 * totalWager);
         }
+        // Cash bursts originate at the EXIT — the ring/conveyor cell
+        // with the arrow drawn on it, not the inner-grid cell the
+        // car left from. Reads as "money flying out the staked exit".
+        const ringCell = scene.ringCells && scene.ringCells[ringPos];
+        const burstPt = ringCell
+          ? { x: ringCell.x, y: ringCell.y }
+          : atPt;
+        if (burstPt) {
+          const cashCount = win >= 5 * totalWager ? 14 : (win >= 2 * totalWager ? 10 : 7);
+          animator._spawnCashScatter(burstPt.x, burstPt.y, cashCount);
+        }
       };
 
       try {
+        // Officers send out their multipliers BEFORE the cars run —
+        // sticky badges land on target arrows and stay through the
+        // round, then get cleared at the end.
+        animator._clearOfficerBoosts();
+        await animator._playOfficerBoosts(officersFired);
+
         const beforeTokens = game.state.conveyor.map(t => ({ ...t }));
         const result = window.RushHour.runSpin(totalWager, game.state);
         await animator.play(result, beforeTokens);
@@ -5226,11 +7079,42 @@ Win = total paytable value × bet of every symbol that exited.`;
         // _spinDropOut when the player presses PLAY again.
         currentGrid = result.finalGrid;
 
+        // ── Total-clearance bonus ──
+        // Count exit events and check whether the entire grid emptied
+        // out (every car drove off). Happens ~5% of rounds with a 4×4
+        // grid. Pays a flat +10× total-wager bonus on top of the
+        // per-exit pays + triggers the full-screen celebration.
+        let _exitCount = 0;
+        for (const ev of result.events) {
+          if (ev.type !== 'rushMovePass') continue;
+          for (const m of (ev.moves || [])) {
+            if (m.kind === 'exit') _exitCount++;
+          }
+        }
+        const _totalCells = GAME.ROWS * GAME.COLS;
+        const _isClearance = _exitCount >= _totalCells && totalWager > 0;
+        if (_isClearance) {
+          const clearanceBonus = 10 * totalWager;
+          totalWin += clearanceBonus;
+          player.balance += clearanceBonus;
+          // Show ONLY the clearance celebration first (CLEAR! + bonus
+          // amount + YAY! button). The regular end-of-round popup
+          // (total win + REPEAT BET button) is held back until YAY
+          // is pressed, so the two dialogs never overlap.
+          await animator._celebrateClearance(clearanceBonus);
+          // After YAY: fold the bonus into the running WIN counter so
+          // the top-of-screen total now reflects the full round win.
+          animator._addToRunningWin(clearanceBonus);
+        }
+
         if (totalWin >= 10 * totalWager) {
           shakeStage(8 * (L.gameScale || 1), 0.45);
           pulseWinPill();
         }
-        // Round done — bets cleared, status reflects outcome.
+        // Round done — bets cleared, status reflects outcome. For a
+        // clearance round we get here AFTER the player tapped YAY,
+        // so the regular popup (total win + REPEAT BET) opens cleanly
+        // on top of an empty stage.
         player.arrowBets = {};
         setRoundStatus(totalWin > 0 ? 'won' : 'lost', { amount: totalWin });
         refreshArrowBetVisuals();
@@ -5239,7 +7123,16 @@ Win = total paytable value × bet of every symbol that exited.`;
         setRoundStatus('idle');
       } finally {
         animator.onRushExit = null;
+        animator._clearOfficerBoosts();
         scene.spinBtn._setBusy(false);
+        // Correct the per-spin stats. The engine returns finalWin=0
+        // for rush mode (per-exit pay is resolved in the onRushExit
+        // callback above, not in the engine), so runSpinDebug never
+        // saw the real win. Push it in here so the bottom-of-screen
+        // RTP overlay reflects actual play.
+        stats.totalWin += totalWin;
+        if (totalWin > 0) stats.hitCount += 1;
+        if (totalWin > stats.maxWin) stats.maxWin = totalWin;
         refreshHUD({ animateBalance: true });
         refreshArrowBetVisuals();
       }
