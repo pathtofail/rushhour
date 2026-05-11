@@ -2806,16 +2806,24 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         v.y = cy + carCellSize / 2;
         paytableContent.addChild(v);
         const mult = colDef.payMult || 1;
-        const multTxt = new PIXI.Text(`${fmtMult(mult)} per car`, {
-          fontFamily: FONT, fontSize: 13 * scale,
+        const multTxt = new PIXI.Text(fmtMult(mult), {
+          fontFamily: FONT, fontSize: 16 * scale,
           fill: 0xFFD23F, fontWeight: '800',
         });
         multTxt.anchor.set(0.5, 0);
         multTxt.x = cellCX;
-        multTxt.y = cy + carCellSize + 6 * scale;
+        multTxt.y = cy + carCellSize + 4 * scale;
         paytableContent.addChild(multTxt);
+        const perCarTxt = new PIXI.Text('per car', {
+          fontFamily: FONT, fontSize: 10 * scale,
+          fill: 0xA8AEB6, fontWeight: '500',
+        });
+        perCarTxt.anchor.set(0.5, 0);
+        perCarTxt.x = cellCX;
+        perCarTxt.y = cy + carCellSize + 24 * scale;
+        paytableContent.addChild(perCarTxt);
       }
-      cy += carCellSize + 36 * scale;
+      cy += carCellSize + 48 * scale;
 
       // ── Special Bets content (officer mode only) ────────────────
       // Dedicated tab so the 3 special bet tiers each get room to
