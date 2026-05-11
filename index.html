@@ -255,24 +255,23 @@
     const OFFICER_FIRE_CHANCE  = 0.20;   // per officer per round (down from 0.35)
 
     // ── Ante / Special-Bet modes ────────────────────────────────
-    // Fortune-of-Olympus-style tiered side bets. Each mode pays an
-    // extra `cost × stake` per spin in exchange for buffed officer
-    // mechanics. Cost = 0 means base game (no extra wager).
+    // Fortune-of-Olympus-style tiered side bets. costMult is the TOTAL
+    // per-arrow cost multiplier — each chip placed is deducted at
+    // `chipValue × costMult`, but the WIN is calculated against the
+    // base chip value. The extra payment buys buffed officer mechanics
+    // for that spin; it does not multiply per-arrow wins.
     //
-    //   base    — no surcharge; baseline 4 officers × 20% fire rate.
-    //   ante1   — recurring +cost surcharge; per-officer fire rate
-    //             bumped up so more multipliers land each round.
-    //   super1  — premium one-shot surcharge (10× stake); 2 officers
-    //             are GUARANTEED to fire this round (the remaining 2
-    //             still roll the base 20%).
-    //   super2  — top-tier one-shot surcharge (50× stake); same
-    //             guaranteed-fires mechanic AS super1, but the
-    //             multiplier table is replaced with a high-floor
-    //             ladder that starts at 50× and tops at 1000×.
+    //   base    — 1× cost, 20% fire chance per officer, base mults.
+    //   ante1   — 1.25× cost, 40% fire chance (2× base), base mults.
+    //   super1  — 10× cost, all 4 officers always fire, high-weighted
+    //             base-range mults (avg ~50×).
+    //   super2  — 20× cost, all 4 officers always fire, 10×–1000×
+    //             mult ladder AND arrowOddsMult=2 (corners 3→6,
+    //             middles 4→8).
     //
-    // multValues / multWeights / fireChance / guaranteedFires can be
-    // tuned per mode independently. The cost is a flat surcharge on
-    // the SUM of arrow stakes (or fixed-floor if min < 1 arrow staked).
+    // Knobs that can vary per mode: costMult, fireChance,
+    // guaranteedFires, multValues, multWeights, arrowOddsMult. All
+    // four modes are sim-tuned to ~95–98% RTP (scripts/sim-ante.mjs).
     const ANTE_MODES = {
       base: {
         key: 'base',
@@ -3052,12 +3051,13 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
     }
 
     // ── SPECIAL BETS modal ────────────────────────────────────────
-    // Player taps the SPECIAL BETS rail button → modal opens with 4
-    // cards (one per ANTE_MODE). Selecting a card sets the mode and
-    // closes the modal. The active mode's card is rendered in the
-    // yellow "active" pill style (matches active chip + WIN amount).
-    // Layout: horizontal row of cards on desktop, vertical stack on
-    // mobile so each card stays a comfortable tap target.
+    // Player taps the SPECIAL BETS rail button → modal opens with 3
+    // cards (one per non-base ANTE_MODE: ante1, super1, super2).
+    // Selecting a card sets the mode and closes the modal. The active
+    // mode's card is rendered in the yellow "active" style (matches
+    // active chip + WIN amount). Layout: horizontal row of cards on
+    // desktop, vertical stack on mobile so each card stays a
+    // comfortable tap target.
     function openSpecialBetsModal() {
       if (scene.specialBetsModal) return;
       const modal = new PIXI.Container();
@@ -3070,8 +3070,8 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         : Math.min(1, Math.min(sw / 900, sh / 900));
       app.stage.addChild(modal);
 
-      // Backdrop — click outside cards to close (returns to whatever
-      // mode was active before the modal opened).
+      // Backdrop — click outside the panel to dismiss the modal
+      // without changing the active mode.
       const backdrop = new PIXI.Graphics();
       backdrop.beginFill(0x000000, 0.72);
       backdrop.drawRect(0, 0, sw, sh);
@@ -3088,7 +3088,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       const cards = [
         { key: 'ante1',  subtitle: '2× MORE FIRES', desc: 'Officers fire 2× more often.' },
         { key: 'super1', subtitle: 'ALL FIRE',      desc: 'All 4 officers always fire each spin.' },
-        { key: 'super2', subtitle: 'MEGA MULTIPLIERS', desc: 'Mults from 10× up to 500×.' },
+        { key: 'super2', subtitle: 'MEGA MULTIPLIERS', desc: 'Mults from 10× up to 1000×, with doubled exit pays.' },
       ];
       const padY  = 28 * scale;
       const cardW = isMobile ? 380 * scale : 200 * scale;
@@ -3151,7 +3151,6 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       // Cards.
       const cardsTop  = panelY + padY + titleH;
       const cardsLeft = panelX + (panelW - (isMobile ? cardW : cards.length * cardW + (cards.length - 1) * cardGap)) / 2;
-      const cardConts = [];
       cards.forEach((c, i) => {
         const def = ANTE_MODES[c.key];
         if (!def) return;
@@ -3192,7 +3191,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
           nameTxt.x = -cardW / 2 + 16 * scale;
           nameTxt.y = -cardH / 2 + 12 * scale;
           cont.addChild(nameTxt);
-          const costLabel = def.costMult > 0 ? `+${def.costMult}× BET` : 'NO EXTRA COST';
+          const costLabel = `${def.costMult}× BET`;
           const costTxt = new PIXI.Text(costLabel, {
             fontFamily: FONT, fontSize: 11 * scale,
             fill: accent, fontWeight: '700', letterSpacing: 1.4,
@@ -3219,7 +3218,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
           nameTxt.x = 0;
           nameTxt.y = -cardH / 2 + 24 * scale;
           cont.addChild(nameTxt);
-          const costLabel = def.costMult > 0 ? `+${def.costMult}× BET` : 'STANDARD';
+          const costLabel = `${def.costMult}× BET`;
           const costTxt = new PIXI.Text(costLabel, {
             fontFamily: FONT, fontSize: 16 * scale,
             fill: accent, fontWeight: '800', letterSpacing: 2,
@@ -3253,7 +3252,6 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
           close();
         });
         modal.addChild(cont);
-        cardConts.push(cont);
       });
 
       modal.alpha = 0;
@@ -4602,9 +4600,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         const knobR = sbToggleH / 2 - 3;
         const knobOff = -sbToggleW / 2 + knobR + 3;
         const knobOn  =  sbToggleW / 2 - knobR - 3;
-        let _activeState = false;
         const draw = (active) => {
-          _activeState = active;
           track.clear();
           // Off: dark slate track + dim grey border, knob is muted
           //      grey (clearly "inactive" — no yellow accent at all).
@@ -4672,12 +4668,12 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         if (L.isMobile) {
           if (top) {
             top.text = active
-              ? `${ante.name} · +${ante.costMult}× BET`
+              ? `${ante.name} · ${ante.costMult}× BET`
               : 'SPECIAL BETS';
           }
         } else {
           if (top) top.text = active ? ante.name      : 'SPECIAL\nBETS';
-          if (sub) sub.text = active ? `+${ante.costMult}× BET` : '4 OPTIONS';
+          if (sub) sub.text = active ? `${ante.costMult}× BET` : '3 OPTIONS';
         }
         if (scene.specialBetsRadio) scene.specialBetsRadio._draw(active);
       }
