@@ -223,7 +223,13 @@
     let RUSH_ARROW_ODDS = RUSH_ARROW_ODDS_BASE;
     const RUSH_DEFAULT_ARROW_ODDS = 2.0;
     function arrowOddsFor(pos) {
-      return RUSH_ARROW_ODDS[pos] ?? RUSH_DEFAULT_ARROW_ODDS;
+      const base = RUSH_ARROW_ODDS[pos] ?? RUSH_DEFAULT_ARROW_ODDS;
+      // Ante modes may multiply the base arrow odds (e.g. super2
+      // doubles 3× → 6× on corners, 4× → 8× on middles).
+      const oddsMult = (typeof getAnteDef === 'function')
+        ? (getAnteDef().arrowOddsMult || 1)
+        : 1;
+      return base * oddsMult;
     }
     // Sum the stakes the player has placed across all arrows.
     function sumArrowBets(bets) {
@@ -247,15 +253,103 @@
     const OFFICER_MULT_VALUES  = [2, 4, 10, 25, 50, 100];
     const OFFICER_MULT_WEIGHTS = [55, 30, 12, 5, 2, 1];
     const OFFICER_FIRE_CHANCE  = 0.20;   // per officer per round (down from 0.35)
-    function rollOfficerMultiplier() {
+
+    // ── Ante / Special-Bet modes ────────────────────────────────
+    // Fortune-of-Olympus-style tiered side bets. Each mode pays an
+    // extra `cost × stake` per spin in exchange for buffed officer
+    // mechanics. Cost = 0 means base game (no extra wager).
+    //
+    //   base    — no surcharge; baseline 4 officers × 20% fire rate.
+    //   ante1   — recurring +cost surcharge; per-officer fire rate
+    //             bumped up so more multipliers land each round.
+    //   super1  — premium one-shot surcharge (10× stake); 2 officers
+    //             are GUARANTEED to fire this round (the remaining 2
+    //             still roll the base 20%).
+    //   super2  — top-tier one-shot surcharge (50× stake); same
+    //             guaranteed-fires mechanic AS super1, but the
+    //             multiplier table is replaced with a high-floor
+    //             ladder that starts at 50× and tops at 1000×.
+    //
+    // multValues / multWeights / fireChance / guaranteedFires can be
+    // tuned per mode independently. The cost is a flat surcharge on
+    // the SUM of arrow stakes (or fixed-floor if min < 1 arrow staked).
+    const ANTE_MODES = {
+      base: {
+        key: 'base',
+        name: 'NORMAL',
+        costMult: 1,
+        fireChance: OFFICER_FIRE_CHANCE,
+        guaranteedFires: 0,
+        multValues:  OFFICER_MULT_VALUES,
+        multWeights: OFFICER_MULT_WEIGHTS,
+      },
+      ante1: {
+        key: 'ante1',
+        name: 'ANTE',
+        costMult: 1.25,                        // 1.25× per-arrow total cost
+        // Only knob bumped from base: officer fire chance is doubled
+        // (20% → 40% per officer). Mult table unchanged from base.
+        fireChance: 0.40,
+        guaranteedFires: 0,
+        multValues:  OFFICER_MULT_VALUES,
+        multWeights: OFFICER_MULT_WEIGHTS,
+      },
+      super1: {
+        key: 'super1',
+        name: 'SUPER',
+        costMult: 10,
+        fireChance: 1.0,                       // every officer always fires
+        guaranteedFires: 0,
+        // Avg mult ~50 (vs base 6.4) — lands super 1 at ~98% RTP at
+        // the locked 10× per-arrow cost.
+        multValues:  [2, 4, 10, 25, 50, 100],
+        multWeights: [ 2, 3, 10, 25, 35, 25],
+      },
+      super2: {
+        key: 'super2',
+        name: 'MEGA',
+        costMult: 20,
+        fireChance: 1.0,                       // every officer always fires
+        guaranteedFires: 0,
+        // 10× – 1000× ladder. Avg mult ~50.5 — lands super 2 at
+        // ~98% RTP at the locked 20× per-arrow cost with
+        // arrowOddsMult=2.
+        multValues:  [10, 25, 50, 100, 250, 500, 1000],
+        multWeights: [50, 26, 12,  6,   5,   1,    1],
+        // Base arrow odds doubled — corners 3× → 6×, middles 4× → 8×.
+        arrowOddsMult: 2,
+      },
+    };
+    let ANTE_MODE = 'base';
+    function getAnteDef() { return ANTE_MODES[ANTE_MODE] || ANTE_MODES.base; }
+    function setAnteMode(key) {
+      if (!ANTE_MODES[key]) return;
+      if (ANTE_MODE === key) return;
+      ANTE_MODE = key;
+      // Clear existing arrow bets — switching ante mode changes the
+      // per-arrow cost (stake × costMult), so previously-placed
+      // chips would no longer reflect what the player intended.
+      // Safer to wipe and let them re-stake fresh.
+      // `player` is declared later with `let`, so before module init
+      // even `typeof` access hits the TDZ. Try/catch swallows that.
+      try { if (player) player.arrowBets = {}; } catch (_) {}
+      // Drop the per-arrow stake graphics so the cleared bets actually
+      // disappear from the grid (refreshHUD alone doesn't touch them).
+      try { refreshArrowBetVisuals(); } catch (_) {}
+    }
+
+    function rollOfficerMultiplier(ante) {
+      const a = ante || ANTE_MODES.base;
+      const values  = a.multValues;
+      const weights = a.multWeights;
       let total = 0;
-      for (const w of OFFICER_MULT_WEIGHTS) total += w;
+      for (const w of weights) total += w;
       let r = Math.random() * total;
-      for (let i = 0; i < OFFICER_MULT_VALUES.length; i++) {
-        r -= OFFICER_MULT_WEIGHTS[i];
-        if (r <= 0) return OFFICER_MULT_VALUES[i];
+      for (let i = 0; i < values.length; i++) {
+        r -= weights[i];
+        if (r <= 0) return values[i];
       }
-      return OFFICER_MULT_VALUES[0];
+      return values[0];
     }
     // For each corner (0=TL, 1=TR, 2=BR, 3=BL), the two edges it can
     // target. Returns a single ringPos picked at random.
@@ -277,16 +371,37 @@
     }
     // Roll the round's boosts. Returns an array of fired officers + a
     // boosts map keyed by ringPos → multiplier value.
+    //
+    // Modes (via getAnteDef()):
+    //   - guaranteedFires: pick N random corners that ALWAYS fire
+    //     this round. The remaining corners still roll fireChance.
+    //   - fireChance: per-officer base probability for non-guaranteed
+    //     corners.
+    //   - multValues / multWeights: face values + weights for this
+    //     mode's multiplier table.
     function rollOfficerBoosts() {
+      const ante = getAnteDef();
       const fired = [];
       const boosts = {};
+      // Pick which corners are forced to fire (Fisher–Yates shuffle).
+      const corners = [0, 1, 2, 3];
+      for (let i = corners.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [corners[i], corners[j]] = [corners[j], corners[i]];
+      }
+      const forced = new Set(corners.slice(0, ante.guaranteedFires || 0));
       for (let corner = 0; corner < 4; corner++) {
-        if (Math.random() >= OFFICER_FIRE_CHANCE) continue;
-        const mult = rollOfficerMultiplier();
+        const fires = forced.has(corner) || Math.random() < ante.fireChance;
+        if (!fires) continue;
+        const mult = rollOfficerMultiplier(ante);
         let pos = pickOfficerTargetArrow(corner);
-        // If a previous officer already targeted this arrow, multiply
-        // the boosts together (rare but coherent).
-        boosts[pos] = (boosts[pos] || 1) * mult;
+        // If a previous officer already targeted this arrow, ADD the
+        // multipliers together. Multiplying would scale quadratically
+        // with mult value (e.g. two 100× fires on the same arrow →
+        // 10000×), which inflates RTP wildly in higher-mult ante
+        // modes. Addition keeps stacking value linear — two 100×
+        // fires on the same arrow → 200×, exactly twice the value.
+        boosts[pos] = (boosts[pos] || 0) + mult;
         fired.push({ corner, multiplier: mult, ringPos: pos });
       }
       return { boosts, fired };
@@ -1047,6 +1162,8 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       generateGrid,
       stats, resetStats,
       MODE_DEF, MODE_HOOKS_DEFAULT, getModeDef, setMode,
+      ANTE_MODES, getAnteDef, setAnteMode,
+      arrowOddsFor,
       _debug: {},
     };
 
@@ -1508,7 +1625,12 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       // Mobile bottom panel hosts 4 rows: chips · ctrl row · TOTAL · PLAY
       // (with breathing room). Desktop: single dense row + balance/chips
       // column on the left side of the cluster.
-      const bottomPanelH = isMobile ? 240 : 130;
+      // Mobile keeps an extra row at the top of the bottom panel for
+      // the SPECIAL BETS pill (no horizontal room beside the grid).
+      // Desktop: SPECIAL BETS lives as a square block to the LEFT of
+      // the grid, so the bottom panel keeps its original single-row
+      // height.
+      const bottomPanelH = isMobile ? 290 : 130;
       const bottomPad    = isMobile ? 8 : 14;
       const horizK = FRAME_W_CELLS + (FRAME_W_CELLS - 1) * GAP_RATIO;
       const vertK  = FRAME_H_CELLS + (FRAME_H_CELLS - 1) * GAP_RATIO;
@@ -2929,6 +3051,228 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       });
     }
 
+    // ── SPECIAL BETS modal ────────────────────────────────────────
+    // Player taps the SPECIAL BETS rail button → modal opens with 4
+    // cards (one per ANTE_MODE). Selecting a card sets the mode and
+    // closes the modal. The active mode's card is rendered in the
+    // yellow "active" pill style (matches active chip + WIN amount).
+    // Layout: horizontal row of cards on desktop, vertical stack on
+    // mobile so each card stays a comfortable tap target.
+    function openSpecialBetsModal() {
+      if (scene.specialBetsModal) return;
+      const modal = new PIXI.Container();
+      modal._isSimpleModal = true;
+      _openSimpleModalCount++;
+      const sw = L.sw, sh = L.sh;
+      const isMobile = !!L.isMobile;
+      const scale = isMobile
+        ? Math.min(sw * 0.94 / 540, sh * 0.92 / 600)
+        : Math.min(1, Math.min(sw / 900, sh / 900));
+      app.stage.addChild(modal);
+
+      // Backdrop — click outside cards to close (returns to whatever
+      // mode was active before the modal opened).
+      const backdrop = new PIXI.Graphics();
+      backdrop.beginFill(0x000000, 0.72);
+      backdrop.drawRect(0, 0, sw, sh);
+      backdrop.endFill();
+      backdrop.eventMode = 'static';
+      backdrop.on('pointertap', (e) => { if (e.target === backdrop) close(); });
+      modal.addChild(backdrop);
+
+      // Panel — same dark slate fill / yellow border as the BALANCE +
+      // TOTAL BET pills, so the modal feels native to the game.
+      // Normal/base isn't a "special bet" — it's the default mode.
+      // Player returns to base via the toggle switch on the SPECIAL
+      // BETS pill, not from this modal.
+      const cards = [
+        { key: 'ante1',  subtitle: '2× MORE FIRES', desc: 'Officers fire 2× more often.' },
+        { key: 'super1', subtitle: 'ALL FIRE',      desc: 'All 4 officers always fire each spin.' },
+        { key: 'super2', subtitle: 'MEGA MULTIPLIERS', desc: 'Mults from 10× up to 500×.' },
+      ];
+      const padY  = 28 * scale;
+      const cardW = isMobile ? 380 * scale : 200 * scale;
+      const cardH = isMobile ?  84 * scale : 220 * scale;
+      const cardGap = 14 * scale;
+      const titleH = 40 * scale;
+      const closeR = 22 * scale;
+
+      let panelW, panelH;
+      if (isMobile) {
+        panelW = cardW + padY * 2;
+        panelH = padY + titleH + cards.length * cardH + (cards.length - 1) * cardGap + padY;
+      } else {
+        panelW = cards.length * cardW + (cards.length - 1) * cardGap + padY * 2;
+        panelH = padY + titleH + cardH + padY;
+      }
+      const panelX = (sw - panelW) / 2;
+      const panelY = (sh - panelH) / 2;
+
+      const panel = new PIXI.Graphics();
+      panel.lineStyle(3 * scale, 0xFFD23F, 1);
+      panel.beginFill(0x1A2332, 0.98);
+      panel.drawRoundedRect(panelX, panelY, panelW, panelH, 18 * scale);
+      panel.endFill();
+      panel.eventMode = 'static';
+      panel.hitArea = new PIXI.Rectangle(panelX, panelY, panelW, panelH);
+      modal.addChild(panel);
+
+      // Title.
+      const title = new PIXI.Text('SELECT A SPECIAL BET', {
+        fontFamily: FONT, fontSize: 18 * scale, fill: 0xFFD23F,
+        fontWeight: '800', letterSpacing: 2.4,
+      });
+      title.anchor.set(0.5);
+      title.x = panelX + panelW / 2;
+      title.y = panelY + padY + titleH / 2 - 4 * scale;
+      modal.addChild(title);
+
+      // Close (×).
+      const closeBtn = new PIXI.Container();
+      const closeBg = new PIXI.Graphics();
+      closeBg.lineStyle(2 * scale, 0xFFD23F, 1);
+      closeBg.beginFill(0x2A3548, 0.95);
+      closeBg.drawCircle(0, 0, closeR);
+      closeBg.endFill();
+      closeBtn.addChild(closeBg);
+      const closeX = new PIXI.Text('×', {
+        fontFamily: 'Arial, sans-serif', fontWeight: 'bold',
+        fontSize: closeR * 1.6, fill: 0xFFFFFF,
+      });
+      closeX.anchor.set(0.5);
+      closeBtn.addChild(closeX);
+      closeBtn.x = panelX + panelW - 22 * scale;
+      closeBtn.y = panelY + 24 * scale;
+      closeBtn.eventMode = 'static'; closeBtn.cursor = 'pointer';
+      closeBtn.hitArea = new PIXI.Circle(0, 0, closeR);
+      closeBtn.on('pointertap', () => close());
+      modal.addChild(closeBtn);
+
+      // Cards.
+      const cardsTop  = panelY + padY + titleH;
+      const cardsLeft = panelX + (panelW - (isMobile ? cardW : cards.length * cardW + (cards.length - 1) * cardGap)) / 2;
+      const cardConts = [];
+      cards.forEach((c, i) => {
+        const def = ANTE_MODES[c.key];
+        if (!def) return;
+        const isActive = (ANTE_MODE === c.key);
+        const cx = isMobile
+          ? cardsLeft + cardW / 2
+          : cardsLeft + cardW / 2 + i * (cardW + cardGap);
+        const cy = isMobile
+          ? cardsTop + cardH / 2 + i * (cardH + cardGap)
+          : cardsTop + cardH / 2;
+
+        const cont = new PIXI.Container();
+        cont.x = cx; cont.y = cy;
+        const bg = new PIXI.Graphics();
+        const draw = (active, hover = false) => {
+          bg.clear();
+          // Active = saturated yellow fill (matches selected chip).
+          // Inactive = dark slate, yellow border, hovers brighter.
+          const fill   = active ? 0xFFD23F : (hover ? 0x3D4A66 : 0x2A3548);
+          const stroke = active ? 0x1A2332 : 0xFFD23F;
+          bg.lineStyle(active ? 3 * scale : 2 * scale, stroke, 1);
+          bg.beginFill(fill, 1);
+          bg.drawRoundedRect(-cardW / 2, -cardH / 2, cardW, cardH, 12 * scale);
+          bg.endFill();
+        };
+        draw(isActive);
+        cont.addChild(bg);
+        const ink = isActive ? 0x1A2332 : 0xFFFFFF;
+        const accent = isActive ? 0x1A2332 : 0xFFD23F;
+
+        if (isMobile) {
+          // Mobile card — horizontal row: name+cost on left, desc on right.
+          const nameTxt = new PIXI.Text(def.name, {
+            fontFamily: FONT, fontSize: 16 * scale,
+            fill: ink, fontWeight: '800', letterSpacing: 2,
+          });
+          nameTxt.anchor.set(0, 0);
+          nameTxt.x = -cardW / 2 + 16 * scale;
+          nameTxt.y = -cardH / 2 + 12 * scale;
+          cont.addChild(nameTxt);
+          const costLabel = def.costMult > 0 ? `+${def.costMult}× BET` : 'NO EXTRA COST';
+          const costTxt = new PIXI.Text(costLabel, {
+            fontFamily: FONT, fontSize: 11 * scale,
+            fill: accent, fontWeight: '700', letterSpacing: 1.4,
+          });
+          costTxt.anchor.set(0, 0);
+          costTxt.x = -cardW / 2 + 16 * scale;
+          costTxt.y = -cardH / 2 + 36 * scale;
+          cont.addChild(costTxt);
+          const descTxt = new PIXI.Text(c.desc, {
+            fontFamily: FONT, fontSize: 12 * scale,
+            fill: ink, fontWeight: '500',
+          });
+          descTxt.anchor.set(0, 0);
+          descTxt.x = -cardW / 2 + 16 * scale;
+          descTxt.y = -cardH / 2 + 56 * scale;
+          cont.addChild(descTxt);
+        } else {
+          // Desktop card — vertical stack: name on top, cost middle, desc bottom.
+          const nameTxt = new PIXI.Text(def.name, {
+            fontFamily: FONT, fontSize: 22 * scale,
+            fill: ink, fontWeight: '800', letterSpacing: 3,
+          });
+          nameTxt.anchor.set(0.5, 0);
+          nameTxt.x = 0;
+          nameTxt.y = -cardH / 2 + 24 * scale;
+          cont.addChild(nameTxt);
+          const costLabel = def.costMult > 0 ? `+${def.costMult}× BET` : 'STANDARD';
+          const costTxt = new PIXI.Text(costLabel, {
+            fontFamily: FONT, fontSize: 16 * scale,
+            fill: accent, fontWeight: '800', letterSpacing: 2,
+          });
+          costTxt.anchor.set(0.5, 0);
+          costTxt.x = 0;
+          costTxt.y = -cardH / 2 + 70 * scale;
+          cont.addChild(costTxt);
+          // Wrap description to ~2 lines using simple word-wrap.
+          const descTxt = new PIXI.Text(c.desc, {
+            fontFamily: FONT, fontSize: 12 * scale,
+            fill: ink, fontWeight: '500',
+            wordWrap: true, wordWrapWidth: cardW - 24 * scale,
+            align: 'center',
+          });
+          descTxt.anchor.set(0.5, 0);
+          descTxt.x = 0;
+          descTxt.y = -cardH / 2 + 110 * scale;
+          cont.addChild(descTxt);
+        }
+
+        cont.eventMode = 'static';
+        cont.cursor = 'pointer';
+        cont.hitArea = new PIXI.Rectangle(-cardW / 2, -cardH / 2, cardW, cardH);
+        cont.on('pointerover', () => { if (!isActive) draw(false, true); });
+        cont.on('pointerout',  () => { if (!isActive) draw(false, false); });
+        cont.on('pointertap', () => {
+          setAnteMode(c.key);
+          if (scene._refreshSpecialBetsBtn) scene._refreshSpecialBetsBtn();
+          if (typeof refreshHUD === 'function') refreshHUD();
+          close();
+        });
+        modal.addChild(cont);
+        cardConts.push(cont);
+      });
+
+      modal.alpha = 0;
+      gsap.to(modal, { alpha: 1, duration: 0.18, ease: 'power2.out' });
+      scene.specialBetsModal = modal;
+
+      let _closed = false;
+      function close() {
+        if (_closed) return;
+        _closed = true;
+        _openSimpleModalCount = Math.max(0, _openSimpleModalCount - 1);
+        scene.specialBetsModal = null;
+        gsap.to(modal, {
+          alpha: 0, duration: 0.15, ease: 'power2.in',
+          onComplete: () => modal.destroy({ children: true }),
+        });
+      }
+    }
+
     // Soft dark radial halo — black-ish at centre fading to fully
     // transparent at the edge. Used as a "vignette behind a button"
     // that makes the button read as a popup over the navy canvas
@@ -4172,6 +4516,173 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       // BUY FEATURE intentionally off in rush mode.
       scene.buyBtn = null;
 
+      // ── SPECIAL BETS button + radio ─────────────────────────────
+      // Two layouts:
+      //   Desktop: SQUARE block placed to the LEFT of the grid (matches
+      //     the Pragmatic-Play "SPECIAL BETS / N OPTIONS" tile). Two
+      //     stacked text lines: caption ("SPECIAL BETS" or active mode
+      //     name) + sub-line ("4 OPTIONS" or active cost).
+      //   Mobile: Horizontal PILL at the top of the bottom panel
+      //     (single line: name + cost when active, "SPECIAL BETS"
+      //     otherwise) — no horizontal space beside the grid in
+      //     portrait.
+      // The radio sits below the desktop block / beside the mobile
+      // pill and uses the standard radio look (outline + filled inner
+      // dot when active).
+      const sbW = L.isMobile ? Math.min(L.sw - 2 * L.hpad, 360) : 110;
+      // Desktop block now houses the toggle inside, so it needs more
+      // vertical room (text rows up top + toggle near the bottom).
+      const sbH = L.isMobile ? 38 : 140;
+      const sbRadioR = L.isMobile ? 14 : 16;
+      const makeSpecialBetsBtn = () => {
+        const cont = new PIXI.Container();
+        const bg = new PIXI.Graphics();
+        cont.addChild(bg);
+        const isMobile = L.isMobile;
+        // Two text rows on desktop (caption + sub-line). Mobile uses
+        // a single line and ignores the sub-line.
+        const lblTop = new PIXI.Text('', {
+          fontFamily: FONT, fontSize: isMobile ? 13 : 14,
+          fill: 0xFFFFFF, fontWeight: '800', letterSpacing: 1.6,
+          align: 'center',
+        });
+        lblTop.anchor.set(0.5);
+        cont.addChild(lblTop);
+        const lblSub = new PIXI.Text('', {
+          fontFamily: FONT, fontSize: 11,
+          fill: 0xFFD23F, fontWeight: '700', letterSpacing: 1.2,
+          align: 'center',
+        });
+        lblSub.anchor.set(0.5);
+        if (!isMobile) cont.addChild(lblSub);
+        const draw = (active, hover = false) => {
+          bg.clear();
+          const fill   = active ? 0xFFD23F : (hover ? 0x3D4A66 : 0x2A3548);
+          const stroke = active ? 0x1A2332 : 0xFFD23F;
+          bg.lineStyle(active ? 3 : 2, stroke, 1);
+          bg.beginFill(fill, 1);
+          bg.drawRoundedRect(-sbW / 2, -sbH / 2, sbW, sbH, 10);
+          bg.endFill();
+          lblTop.style.fill = active ? 0x1A2332 : 0xFFFFFF;
+          lblSub.style.fill = active ? 0x1A2332 : 0xFFD23F;
+        };
+        // Desktop: caption sits at the top, sub-line just below it,
+        // toggle slot at the bottom of the block (added externally).
+        // Mobile: single centred caption.
+        if (isMobile) {
+          lblTop.x = 0; lblTop.y = 0;
+        } else {
+          lblTop.x = 0; lblTop.y = -sbH * 0.30;
+          lblSub.x = 0; lblSub.y = -sbH * 0.04;
+        }
+        cont._draw = draw;
+        cont._lblTop = lblTop;
+        cont._lblSub = lblSub;
+        cont.eventMode = 'static';
+        cont.cursor = 'pointer';
+        cont.hitArea = new PIXI.Rectangle(-sbW / 2, -sbH / 2, sbW, sbH);
+        cont.on('pointerover', () => { if (ANTE_MODE === 'base') draw(false, true); });
+        cont.on('pointerout',  () => { if (ANTE_MODE === 'base') draw(false, false); });
+        cont.on('pointertap',  () => openSpecialBetsModal());
+        return cont;
+      };
+      // iOS-style toggle switch — pill-shaped track with a sliding
+      // knob. Off: knob left + dark track. On: knob right + yellow
+      // track. Tapping the toggle while ON returns to base mode;
+      // tapping while OFF opens the modal so the player can pick a
+      // special bet to activate.
+      const sbToggleH = sbRadioR * 2;        // track height
+      const sbToggleW = sbToggleH * 1.85;    // standard ~2:1 aspect
+      const makeSpecialBetsRadio = () => {
+        const cont = new PIXI.Container();
+        const track = new PIXI.Graphics();
+        const knob  = new PIXI.Graphics();
+        cont.addChild(track);
+        cont.addChild(knob);
+        const knobR = sbToggleH / 2 - 3;
+        const knobOff = -sbToggleW / 2 + knobR + 3;
+        const knobOn  =  sbToggleW / 2 - knobR - 3;
+        let _activeState = false;
+        const draw = (active) => {
+          _activeState = active;
+          track.clear();
+          // Off: dark slate track + dim grey border, knob is muted
+          //      grey (clearly "inactive" — no yellow accent at all).
+          // On:  saturated yellow track + dark navy knob (active accent).
+          // Pairing knob colour to state makes off-vs-on read-at-a-glance
+          // even on small displays.
+          if (active) {
+            track.lineStyle(2, 0x1A2332, 1);
+            track.beginFill(0xFFD23F, 1);
+          } else {
+            track.lineStyle(2, 0x4A5C7A, 1);
+            track.beginFill(0x2A3548, 1);
+          }
+          track.drawRoundedRect(-sbToggleW / 2, -sbToggleH / 2,
+                                sbToggleW, sbToggleH, sbToggleH / 2);
+          track.endFill();
+          knob.clear();
+          knob.beginFill(active ? 0x1A2332 : 0x6E7B8C, 1);
+          knob.drawCircle(0, 0, knobR);
+          knob.endFill();
+          // Animate knob slide on state changes; instant snap on first paint.
+          gsap.killTweensOf(knob);
+          gsap.to(knob, {
+            x: active ? knobOn : knobOff,
+            duration: cont._initialised ? 0.18 : 0,
+            ease: 'power2.out',
+          });
+          cont._initialised = true;
+        };
+        cont._draw = draw;
+        cont.eventMode = 'static';
+        cont.cursor = 'pointer';
+        cont.hitArea = new PIXI.Rectangle(
+          -sbToggleW / 2 - 4, -sbToggleH / 2 - 4,
+          sbToggleW + 8, sbToggleH + 8,
+        );
+        cont.on('pointertap', (e) => {
+          // Toggle now lives INSIDE the block container; without
+          // stopPropagation the parent block's pointertap would also
+          // fire (and re-open the modal on every off→on toggle tap).
+          if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+          if (ANTE_MODE === 'base') {
+            // Off → tap opens the modal so the player picks a mode.
+            openSpecialBetsModal();
+          } else {
+            // On → tap reverts to base.
+            setAnteMode('base');
+            if (scene._refreshSpecialBetsBtn) scene._refreshSpecialBetsBtn();
+            if (typeof refreshHUD === 'function') refreshHUD();
+          }
+        });
+        return cont;
+      };
+      scene.specialBetsBtn   = makeSpecialBetsBtn();
+      scene.specialBetsRadio = makeSpecialBetsRadio();
+      // Module-scoped refresher so other call sites (modal selection,
+      // refreshHUD on bet change) can sync the button label/state.
+      function refreshSpecialBetsBtn() {
+        if (!scene.specialBetsBtn) return;
+        const ante = getAnteDef();
+        const active = ante.key !== 'base';
+        scene.specialBetsBtn._draw(active);
+        const top = scene.specialBetsBtn._lblTop;
+        const sub = scene.specialBetsBtn._lblSub;
+        if (L.isMobile) {
+          if (top) {
+            top.text = active
+              ? `${ante.name} · +${ante.costMult}× BET`
+              : 'SPECIAL BETS';
+          }
+        } else {
+          if (top) top.text = active ? ante.name      : 'SPECIAL\nBETS';
+          if (sub) sub.text = active ? `+${ante.costMult}× BET` : '4 OPTIONS';
+        }
+        if (scene.specialBetsRadio) scene.specialBetsRadio._draw(active);
+      }
+      scene._refreshSpecialBetsBtn = refreshSpecialBetsBtn;
+
       if (L.isMobile) {
         // ─── Mobile portrait: top bar + vertical bottom panel ─────
         // Top bar — INFO icon left, BALANCE pill right.
@@ -4184,17 +4695,29 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         scene.balancePill.y = tbCY;
         scene.stage.addChild(scene.balancePill);
 
-        // Bottom panel — vertical stack. Compute row Y positions
-        // so heights add up to bottomPanelH.
-        const ROW_GAP = 12;
-        const rowsH   = chipH + ctrlH + totalBoxH + playH;
-        const totalGaps = ROW_GAP * 3;
+        // Bottom panel — vertical stack. Compute row Y positions so
+        // all 5 rows (special-bets, chips, ctrl, total, play) plus
+        // the gaps between them add up to bottomPanelH.
+        const ROW_GAP = 10;
+        const rowsH   = sbH + chipH + ctrlH + totalBoxH + playH;
+        const totalGaps = ROW_GAP * 4;
         const stackTop  = panelTop + (L.bottomPanelH - rowsH - totalGaps) / 2;
-        const chipsRowCY = stackTop + chipH / 2;
+        const sbRowCY    = stackTop + sbH / 2;
+        const chipsRowCY = sbRowCY    + sbH / 2 + ROW_GAP + chipH / 2;
         const ctrlRowCY  = chipsRowCY + chipH / 2 + ROW_GAP + ctrlH / 2;
         const totalCY    = ctrlRowCY  + ctrlH / 2 + ROW_GAP + totalBoxH / 2;
         const playCY     = totalCY    + totalBoxH / 2 + ROW_GAP + playH / 2;
         const centerX    = L.sw / 2;
+        // SPECIAL BETS button + radio — pill centred, radio to its right.
+        const sbRadioGap = 12;
+        const sbBtnCX = centerX - sbRadioR - sbRadioGap / 2;
+        const sbRadioCX = sbBtnCX + sbW / 2 + sbRadioGap + sbRadioR;
+        scene.specialBetsBtn.x   = sbBtnCX;
+        scene.specialBetsBtn.y   = sbRowCY;
+        scene.specialBetsRadio.x = sbRadioCX;
+        scene.specialBetsRadio.y = sbRowCY;
+        scene.stage.addChild(scene.specialBetsBtn);
+        scene.stage.addChild(scene.specialBetsRadio);
 
         // Chips row (centred).
         scene.chipBtns = [];
@@ -4224,19 +4747,29 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         // PLAY — full-width CTA at the bottom.
         scene.spinBtn = makePlayButton(centerX, playCY, playW, playH);
       } else {
-        // ─── Desktop: single-row cluster (unchanged geometry) ────
+        // ─── Desktop: single-row cluster (original layout) ────────
+        // SPECIAL BETS button + radio are placed AS A SQUARE BLOCK
+        // to the LEFT of the grid (further down, after this if/else)
+        // so they're not part of the bottom-panel row.
+        const clusterCY = panelCY;
+
+        // SPECIAL BETS square block centred vertically against the
+        // grid's left edge. Radio sits below the block. Both are
+        // placed BELOW after the if/else (they don't depend on the
+        // cluster geometry).
+
         // BALANCE pill sits ABOVE the chips, same width as chips.
         const balancePillH = 28;
         const colInnerGap  = 4;
         const colH         = balancePillH + colInnerGap + chipH;
-        const colTop       = panelCY - colH / 2;
+        const colTop       = clusterCY - colH / 2;
         const balancePillCY = colTop + balancePillH / 2;
         const chipsRowCY    = colTop + balancePillH + colInnerGap + chipH / 2;
 
         const rowW    = chipsW + sectionGap + ctrlW + sectionGap + totalBoxW + sectionGap + playW;
         const rowLeft = (L.sw - rowW) / 2;
         scene.infoBtn.x = rowLeft - 18 - infoSize / 2;
-        scene.infoBtn.y = panelCY;
+        scene.infoBtn.y = clusterCY;
 
         scene.balancePill = makeBalancePill('BALANCE', fmtCash(player.balance), chipsW, balancePillH);
         scene.balancePill.x = rowLeft + chipsW / 2;
@@ -4254,8 +4787,8 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         }
         const afterChipsX = rowLeft + chipsW + sectionGap;
 
-        const stackTopRowCY    = panelCY - (stackH / 2) + ctrlH / 2;
-        const stackBottomRowCY = panelCY + (stackH / 2) - ctrlH / 2;
+        const stackTopRowCY    = clusterCY - (stackH / 2) + ctrlH / 2;
+        const stackBottomRowCY = clusterCY + (stackH / 2) - ctrlH / 2;
         const stackCX          = afterChipsX + ctrlW / 2;
         const clearBtn = makeControlButton('Clear Bets', 0xE63946, () => clearAllArrowBets());
         clearBtn.x = stackCX; clearBtn.y = stackTopRowCY;
@@ -4268,11 +4801,31 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
 
         const afterStackX = afterChipsX + ctrlW + sectionGap;
         const totalCX = afterStackX + totalBoxW / 2;
-        makeTotalBetBox(totalCX, panelCY, totalBoxW, totalBoxH);
+        makeTotalBetBox(totalCX, clusterCY, totalBoxW, totalBoxH);
         const afterTotalX = afterStackX + totalBoxW + sectionGap;
 
-        scene.spinBtn = makePlayButton(afterTotalX + playW / 2, panelCY, playW, playH);
+        scene.spinBtn = makePlayButton(afterTotalX + playW / 2, clusterCY, playW, playH);
+
+        // ── Desktop: SPECIAL BETS square block at the LEFT of grid.
+        // Sits in the canvas margin between the left edge and the
+        // grid's left edge with comfortable breathing room. The
+        // toggle switch lives INSIDE the block at the bottom.
+        const sbFrameGap = 40;          // gap between block and grid frame
+        const sbBlockX = Math.max(L.hpad + sbW / 2, L.frameX - sbFrameGap - sbW / 2);
+        const sbBlockY = L.frameY + sbH / 2 + 8;
+        scene.specialBetsBtn.x = sbBlockX;
+        scene.specialBetsBtn.y = sbBlockY;
+        scene.stage.addChild(scene.specialBetsBtn);
+        // Toggle: child of the block container so it lives inside
+        // the rectangle. Local coords — y near the bottom edge with
+        // padding above and below.
+        scene.specialBetsRadio.x = 0;
+        scene.specialBetsRadio.y = sbH * 0.30;
+        scene.specialBetsBtn.addChild(scene.specialBetsRadio);
       }
+      // Render the SPECIAL BETS pill in the right state for the
+      // currently-selected ante mode (base = neutral, otherwise active).
+      refreshSpecialBetsBtn();
 
       // ── REPEAT BET overlay — appears at the centre of the inner grid
       // after a round resolves (won or lost), prompting the player to
@@ -4480,7 +5033,12 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         _displayedBalance = player.balance;
       }
       if (scene.totalBetPill && scene.totalBetPill.valText) {
-        scene.totalBetPill.valText.text = fmtCash(sumArrowBets(player.arrowBets));
+        // TOTAL BET = actual cost deducted on PLAY (stakes × ante.costMult).
+        // Per-arrow stakes are the "1× bet" used for win calculation;
+        // total cost is what the player pays after the ante multiplier.
+        const stakes = sumArrowBets(player.arrowBets);
+        const costMult = getAnteDef().costMult || 1;
+        scene.totalBetPill.valText.text = fmtCash(stakes * costMult);
       }
       refreshChipSelector();
       refreshControlButtonsEnabled();
@@ -4545,17 +5103,22 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
     }
     function canAffordSpin() {
       if (inFreeSpinFeature()) return true;
-      // Multi-bet roulette: total wager is the sum of arrow stakes.
-      return sumArrowBets(player.arrowBets) > 0
-          && player.balance >= sumArrowBets(player.arrowBets);
+      // Multi-bet roulette: total cost = stakes × ante.costMult.
+      // costMult is the TOTAL multiplier (base = 1, ante 2× = 2, etc.).
+      const stakes = sumArrowBets(player.arrowBets);
+      const costMult = getAnteDef().costMult || 1;
+      return stakes > 0 && player.balance >= stakes * costMult;
     }
     function refreshArrowBetVisuals() {
       if (!scene.arrowBetTexts) return;
       const busy = !!(scene.spinBtn && scene.spinBtn.busy);
+      // Show the ACTUAL cost per arrow (stake × ante.costMult) — what
+      // the player pays on PLAY, not the 1× win-calc base.
+      const costMult = getAnteDef().costMult || 1;
       for (const pos in scene.arrowBetTexts) {
         const stake = player.arrowBets[+pos] || 0;
         const txt = scene.arrowBetTexts[pos];
-        if (txt) txt.text = stake > 0 ? fmtCashCompact(stake) : '';
+        if (txt) txt.text = stake > 0 ? fmtCashCompact(stake * costMult) : '';
         // Spin-time dim. Three states for un-staked cells:
         //   • not boosted → entire cell fades to ~30% (existing behaviour)
         //   • boosted     → ONLY the multiplier text + indicator chevron
@@ -4639,6 +5202,14 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       const next = Math.max(0, cur - player.bet);
       if (next === 0) delete player.arrowBets[pos];
       else            player.arrowBets[pos] = next;
+      if (roundStatus === 'won' || roundStatus === 'lost') setRoundStatus('idle');
+      refreshArrowBetVisuals();
+      refreshHUD();
+    }
+    function onArrowClear(pos) {
+      if (scene.spinBtn && scene.spinBtn.busy) return;
+      if (!(pos in player.arrowBets)) return;
+      delete player.arrowBets[pos];
       if (roundStatus === 'won' || roundStatus === 'lost') setRoundStatus('idle');
       refreshArrowBetVisuals();
       refreshHUD();
@@ -7470,7 +8041,15 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         // No bets placed — nothing to spin for.
         return;
       }
-      if (totalWager > player.balance) {
+      // Ante cost — TOTAL multiplier on the per-arrow stake.
+      // base.costMult = 1 → player pays exactly the stake.
+      // ante1.costMult = 2 → each arrow's stake is deducted ×2 (e.g.
+      //   $5 chip → $10 deducted), but the win is still calculated
+      //   against the base $5 (the extra $5 buys the buffed mechanics).
+      const ante = getAnteDef();
+      const anteCostMult = ante.costMult || 1;
+      const totalCost = totalWager * anteCostMult;
+      if (totalCost > player.balance) {
         flashInsufficientBalance();
         return;
       }
@@ -7479,7 +8058,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       // after the round clears.
       const placedBets = { ...player.arrowBets };
       player.lastBets  = { ...player.arrowBets };
-      player.balance -= totalWager;
+      player.balance -= totalCost;
       refreshHUD({ animateBalance: true });
       scene.spinBtn._setBusy(true);
       setRoundStatus('spinning');
@@ -7558,7 +8137,10 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         const _totalCells = GAME.ROWS * GAME.COLS;
         const _isClearance = _exitCount >= _totalCells && totalWager > 0;
         if (_isClearance) {
-          const clearanceBonus = 10 * totalWager;
+          // Clearance bonus = 1× wager. With ~5.3% clearance rate this
+          // adds ~5.3% RTP on top of the arrow-pay baseline. (Was 10×,
+          // which over-paid the system to ~147% RTP.)
+          const clearanceBonus = 1 * totalWager;
           totalWin += clearanceBonus;
           player.balance += clearanceBonus;
           // Show ONLY the clearance celebration first (CLEAR! + bonus
@@ -7601,6 +8183,12 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         // callback above, not in the engine), so runSpinDebug never
         // saw the real win. Push it in here so the bottom-of-screen
         // RTP overlay reflects actual play.
+        // Also correct the wager: runSpinDebug only counted the base
+        // 1× stake (`totalWager`). The actual deducted cost is
+        // `totalWager × ante.costMult`; add the surplus so RTP =
+        // totalWin / actualWagered reflects what the player paid.
+        const _anteCostMult = (getAnteDef().costMult || 1);
+        stats.totalWager += totalWager * (_anteCostMult - 1);
         stats.totalWin += totalWin;
         if (totalWin > 0) stats.hitCount += 1;
         if (totalWin > stats.maxWin) stats.maxWin = totalWin;
