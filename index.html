@@ -335,6 +335,10 @@
       // Drop the per-arrow stake graphics so the cleared bets actually
       // disappear from the grid (refreshHUD alone doesn't touch them).
       try { refreshArrowBetVisuals(); } catch (_) {}
+      // Arrow odds numbers (e.g. "3x" / "4x" on each ring cell) are
+      // baked in at buildScene time. Re-stamp them after a mode change
+      // so super2's arrowOddsMult=2 doubles the displayed values.
+      try { refreshArrowOddsTexts(); } catch (_) {}
     }
 
     function rollOfficerMultiplier(ante) {
@@ -2624,12 +2628,18 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       modal.addChild(closeBtn);
 
       // Tabs.
-      const tabs = [
-        { key: 'paytable', label: 'Paytable' },
-        { key: 'rules',    label: 'Rules' },
-      ];
+      const tabs = MODE === 'officer'
+        ? [
+            { key: 'paytable',    label: 'Paytable' },
+            { key: 'specialBets', label: 'Special Bets' },
+            { key: 'rules',       label: 'Rules' },
+          ]
+        : [
+            { key: 'paytable', label: 'Paytable' },
+            { key: 'rules',    label: 'Rules' },
+          ];
       const tabBarY = panelY + 70 * scale;
-      const tabW = 140 * scale, tabH = 34 * scale, tabGap = 10 * scale;
+      const tabW = (MODE === 'officer' ? 120 : 140) * scale, tabH = 34 * scale, tabGap = 10 * scale;
       const tabsTotalW = tabs.length * tabW + (tabs.length - 1) * tabGap;
       const tabsStartX = panelX + (panelW - tabsTotalW) / 2;
       const tabSprites = [];
@@ -2768,53 +2778,6 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
           paytableContent.addChild(r);
         }
         cy += Math.ceil(officers.length / offColCount) * offRowH + 24 * scale;
-
-        // ── Special bets ──────────────────────────────────────────
-        // Recap the 3 special-bet tiers so players know what they're
-        // paying for. Pulls cost + mechanic line from ANTE_MODES so
-        // any tuning change stays in sync with the paytable.
-        sectionTitle('SPECIAL BETS', cy);
-        cy += 22 * scale;
-        bodyText('Tap SPECIAL BETS to multiply your stake for buffed', cy);
-        cy += 18 * scale;
-        bodyText('officer mechanics. Your bet still wins from the base', cy);
-        cy += 18 * scale;
-        bodyText('amount — the extra pays for the bigger chances.', cy);
-        cy += 24 * scale;
-        const sbRows = [
-          { key: 'ante1',  desc: 'Officers fire 2× more often.' },
-          { key: 'super1', desc: 'All 4 officers always fire each spin.' },
-          { key: 'super2', desc: 'All fire + 10×–1000× mults + doubled exit pays.' },
-        ];
-        const sbRowH = 36 * scale;
-        for (const row of sbRows) {
-          const def = ANTE_MODES[row.key];
-          if (!def) continue;
-          // Mode name (left) + cost badge (right) on the top line.
-          const nameTxt = new PIXI.Text(def.name, {
-            fontFamily: FONT, fontSize: 14 * scale,
-            fill: 0xFFFFFF, fontWeight: '800', letterSpacing: 2,
-          });
-          nameTxt.x = leftX + 8 * scale; nameTxt.y = cy;
-          paytableContent.addChild(nameTxt);
-          const costTxt = new PIXI.Text(`${def.costMult}× BET`, {
-            fontFamily: FONT, fontSize: 14 * scale,
-            fill: 0xFFD23F, fontWeight: '800',
-          });
-          costTxt.anchor.set(1, 0);
-          costTxt.x = leftX + colW;
-          costTxt.y = cy;
-          paytableContent.addChild(costTxt);
-          // Description below the name.
-          const descTxt = new PIXI.Text(row.desc, {
-            fontFamily: FONT, fontSize: 11 * scale,
-            fill: 0xA8AEB6, fontWeight: '500',
-          });
-          descTxt.x = leftX + 8 * scale; descTxt.y = cy + 18 * scale;
-          paytableContent.addChild(descTxt);
-          cy += sbRowH;
-        }
-        cy += 8 * scale;
       }
 
       // ── Cars ──
@@ -2824,13 +2787,15 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       cy += 18 * scale;
       bodyText('Trucks are rare and pay the most.', cy);
       cy += 22 * scale;
-      // Row of mini car graphics with the cash a player wins per
-      // exit at the current bet amount. Two values per car — the win
-      // through a corner arrow (4×) and a middle arrow (5×).
+      // Row of mini car graphics with each car's plain payout
+      // multiplier (e.g. 0.2×, 0.5×, 1×, 3×). Win per car at any
+      // arrow = stake × arrow odds × car multiplier (× officer
+      // boost when applicable) — keeping this cell to the bare
+      // multiplier avoids cramming bet-specific numbers in.
       const carPickColors = ['Compact', 'Sedan', 'SUV', 'Truck'];
       const carCount = carPickColors.length;
       const carCellSize = Math.min(58 * scale, (colW - 24 * scale) / carCount);
-      const currentBet = (player && player.bet) || 1;
+      const fmtMult = (m) => (m % 1 === 0) ? `${m}×` : `${m.toFixed(1)}×`;
       for (let i = 0; i < carCount; i++) {
         const colName = carPickColors[i];
         const colDef = COLOR_BY_NAME[colName];
@@ -2840,30 +2805,145 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         v.x = cellCX;
         v.y = cy + carCellSize / 2;
         paytableContent.addChild(v);
-        // Cash amount won per exit at the current chip value.
-        // Show both corner-arrow win and middle-arrow win.
         const mult = colDef.payMult || 1;
-        const cornerWin = currentBet * _cornerArrowVal * mult;
-        const middleWin = currentBet * _middleArrowVal * mult;
-        const cashLine1 = new PIXI.Text(fmtCash(middleWin), {
-          fontFamily: FONT, fontSize: 14 * scale,
+        const multTxt = new PIXI.Text(`${fmtMult(mult)} per car`, {
+          fontFamily: FONT, fontSize: 13 * scale,
           fill: 0xFFD23F, fontWeight: '800',
         });
-        cashLine1.anchor.set(0.5, 0);
-        cashLine1.x = cellCX;
-        cashLine1.y = cy + carCellSize + 4 * scale;
-        paytableContent.addChild(cashLine1);
-        const cashLine2 = new PIXI.Text(`or ${fmtCash(cornerWin)}`, {
-          fontFamily: FONT, fontSize: 10 * scale,
-          fill: 0xA8AEB6, fontWeight: '500',
-        });
-        cashLine2.anchor.set(0.5, 0);
-        cashLine2.x = cellCX;
-        cashLine2.y = cy + carCellSize + 22 * scale;
-        paytableContent.addChild(cashLine2);
+        multTxt.anchor.set(0.5, 0);
+        multTxt.x = cellCX;
+        multTxt.y = cy + carCellSize + 6 * scale;
+        paytableContent.addChild(multTxt);
       }
-      cy += carCellSize + 40 * scale;
-      bodyText(`Per car at $${currentBet} bet — bigger value on middle arrows, smaller on corner arrows.`, cy, { size: 11, fill: 0xA8AEB6 });
+      cy += carCellSize + 36 * scale;
+
+      // ── Special Bets content (officer mode only) ────────────────
+      // Dedicated tab so the 3 special bet tiers each get room to
+      // breathe — intro paragraph + per-tier card (mode name, cost,
+      // mechanic explanation). Pulls costs from ANTE_MODES so any
+      // tuning change stays in sync. Container is created (and hidden)
+      // even on non-officer modes so setActiveTab can reference it.
+      const specialBetsContent = new PIXI.Container();
+      specialBetsContent.visible = false;
+      modal.addChild(specialBetsContent);
+      let specialBetsContentEndY = contentTop;
+      if (MODE === 'officer') {
+        let scy = contentTop;
+        const sbTitle = (text, y, fill = 0xFFD23F, size = 13) => {
+          const t = new PIXI.Text(text, {
+            fontFamily: FONT, fontSize: size * scale, fill,
+            letterSpacing: 2, fontWeight: '800',
+          });
+          t.x = leftX; t.y = y;
+          specialBetsContent.addChild(t);
+        };
+        const sbBody = (text, y, opts = {}) => {
+          const t = new PIXI.Text(text, {
+            fontFamily: FONT, fontSize: (opts.size || 13) * scale,
+            fill: opts.fill ?? 0xE8DDC4, fontWeight: opts.weight || '500',
+            wordWrap: true, wordWrapWidth: colW - 16 * scale,
+          });
+          t.x = leftX + (opts.indent || 0); t.y = y;
+          specialBetsContent.addChild(t);
+          return t.height;
+        };
+        // Intro.
+        sbTitle('HOW IT WORKS', scy);
+        scy += 22 * scale;
+        scy += sbBody(
+          'Tap SPECIAL BETS to multiply your stake for buffed officer mechanics. ' +
+          'Your win is still calculated from the BASE chip value — the extra you ' +
+          'pay buys bigger fire chances and richer multipliers, not bigger wins per arrow.',
+          scy,
+        );
+        scy += 22 * scale;
+
+        // Per-tier cards.
+        const tiers = [
+          {
+            key: 'ante1',
+            blurb: 'Officers fire 2× more often (40% per officer vs 20% base). Same multiplier table as base.',
+            details: 'Cheapest tier — best for players who want more frequent small boosts without committing big chips.',
+          },
+          {
+            key: 'super1',
+            blurb: 'All 4 officers always fire each spin (vs ~1 fire per spin in base).',
+            details: 'Multiplier table shifted toward higher tiers — avg ~50× per fire vs base 6.4×.',
+          },
+          {
+            key: 'super2',
+            blurb: 'All 4 officers always fire + multiplier ladder extends 10×–1000× + exit pays are doubled (corners 6×, middles 8×).',
+            details: 'Top tier. Bigger arrow odds AND bigger officer multipliers — the highest hits are reserved for this mode.',
+          },
+        ];
+        const cardPad = 14 * scale;
+        const cardInnerW = colW - cardPad * 2;
+        for (const tier of tiers) {
+          const def = ANTE_MODES[tier.key];
+          if (!def) continue;
+          // Probe heights for blurb + details so we can draw the card bg.
+          const probeBlurb = new PIXI.Text(tier.blurb, {
+            fontFamily: FONT, fontSize: 13 * scale, fill: 0xE8DDC4,
+            fontWeight: '500',
+            wordWrap: true, wordWrapWidth: cardInnerW,
+          });
+          const probeDetails = new PIXI.Text(tier.details, {
+            fontFamily: FONT, fontSize: 11 * scale, fill: 0xA8AEB6,
+            fontWeight: '500',
+            wordWrap: true, wordWrapWidth: cardInnerW,
+          });
+          const headerH = 28 * scale;
+          const blurbH = probeBlurb.height;
+          const detailsH = probeDetails.height;
+          probeBlurb.destroy();
+          probeDetails.destroy();
+          const cardH = cardPad + headerH + 6 * scale + blurbH + 10 * scale + detailsH + cardPad;
+          // Card bg.
+          const cardBg = new PIXI.Graphics();
+          cardBg.lineStyle(2 * scale, 0xC9A24A, 1);
+          cardBg.beginFill(0x232B45, 1);
+          cardBg.drawRoundedRect(leftX, scy, colW, cardH, 12 * scale);
+          cardBg.endFill();
+          specialBetsContent.addChild(cardBg);
+          // Header row: mode name (left) + cost badge (right).
+          const nameTxt = new PIXI.Text(def.name, {
+            fontFamily: FONT, fontSize: 18 * scale, fill: 0xFFD23F,
+            fontWeight: '900', letterSpacing: 3,
+          });
+          nameTxt.x = leftX + cardPad;
+          nameTxt.y = scy + cardPad;
+          specialBetsContent.addChild(nameTxt);
+          const costTxt = new PIXI.Text(`${def.costMult}× BET`, {
+            fontFamily: FONT, fontSize: 15 * scale, fill: 0xFFFFFF,
+            fontWeight: '800', letterSpacing: 2,
+          });
+          costTxt.anchor.set(1, 0);
+          costTxt.x = leftX + colW - cardPad;
+          costTxt.y = scy + cardPad + 2 * scale;
+          specialBetsContent.addChild(costTxt);
+          // Blurb (primary mechanic).
+          const blurb = new PIXI.Text(tier.blurb, {
+            fontFamily: FONT, fontSize: 13 * scale, fill: 0xE8DDC4,
+            fontWeight: '500',
+            wordWrap: true, wordWrapWidth: cardInnerW,
+          });
+          blurb.x = leftX + cardPad;
+          blurb.y = scy + cardPad + headerH + 6 * scale;
+          specialBetsContent.addChild(blurb);
+          // Details (secondary line).
+          const details = new PIXI.Text(tier.details, {
+            fontFamily: FONT, fontSize: 11 * scale, fill: 0xA8AEB6,
+            fontWeight: '500',
+            wordWrap: true, wordWrapWidth: cardInnerW,
+          });
+          details.x = leftX + cardPad;
+          details.y = blurb.y + blurbH + 10 * scale;
+          specialBetsContent.addChild(details);
+          scy += cardH + 14 * scale;
+        }
+        scy += 8 * scale;
+        specialBetsContentEndY = scy;
+      }
 
       // Rules content (text).
       const rulesContent = new PIXI.Container();
@@ -2905,18 +2985,21 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         modal.addChild(m);
         return m;
       };
-      const paytableMask = makeMask();
-      const rulesMask    = makeMask();
-      paytableContent.mask = paytableMask;
-      rulesContent.mask    = rulesMask;
+      const paytableMask    = makeMask();
+      const specialBetsMask = makeMask();
+      const rulesMask       = makeMask();
+      paytableContent.mask    = paytableMask;
+      specialBetsContent.mask = specialBetsMask;
+      rulesContent.mask       = rulesMask;
 
       // Total content heights — captured BEFORE masking would clip
-      // height calc. paytable uses cy (running Y cursor at end of
-      // render); rules uses the wrapped text height.
-      const paytableTotalH = cy - contentTop;
-      const rulesTotalH    = rulesBody.height;
-      const paytableScrollMax = Math.max(0, paytableTotalH - scrollAreaH);
-      const rulesScrollMax    = Math.max(0, rulesTotalH    - scrollAreaH);
+      // height calc.
+      const paytableTotalH    = cy - contentTop;
+      const specialBetsTotalH = specialBetsContentEndY - contentTop;
+      const rulesTotalH       = rulesBody.height;
+      const paytableScrollMax    = Math.max(0, paytableTotalH    - scrollAreaH);
+      const specialBetsScrollMax = Math.max(0, specialBetsTotalH - scrollAreaH);
+      const rulesScrollMax       = Math.max(0, rulesTotalH       - scrollAreaH);
 
       // Scrollbar (visible only when active tab's content overflows).
       const sbW = 5 * scale;
@@ -2931,9 +3014,12 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
 
       const activeScrollInfo = () => {
         if (rulesContent.visible) {
-          return { content: rulesContent,    total: rulesTotalH,    max: rulesScrollMax };
+          return { content: rulesContent,       total: rulesTotalH,       max: rulesScrollMax };
         }
-        return     { content: paytableContent, total: paytableTotalH, max: paytableScrollMax };
+        if (specialBetsContent.visible) {
+          return { content: specialBetsContent, total: specialBetsTotalH, max: specialBetsScrollMax };
+        }
+        return   { content: paytableContent,    total: paytableTotalH,    max: paytableScrollMax };
       };
       const updateScrollbar = () => {
         const info = activeScrollInfo();
@@ -2969,8 +3055,10 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
           t._draw(i === activeIdx, false);
           t._lbl.style.fill = i === activeIdx ? 0xC9A24A : 0x8896BB;
         });
-        paytableContent.visible = (tabSprites[activeIdx]._key === 'paytable');
-        rulesContent.visible    = (tabSprites[activeIdx]._key === 'rules');
+        const activeKey = tabSprites[activeIdx]._key;
+        paytableContent.visible    = (activeKey === 'paytable');
+        specialBetsContent.visible = (activeKey === 'specialBets');
+        rulesContent.visible       = (activeKey === 'rules');
         updateScrollbar();
       }
 
@@ -5170,6 +5258,15 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       const costMult = getAnteDef().costMult || 1;
       return stakes > 0 && player.balance >= stakes * costMult;
     }
+    function refreshArrowOddsTexts() {
+      if (!scene.arrowOddsTexts) return;
+      for (const pos in scene.arrowOddsTexts) {
+        const txt = scene.arrowOddsTexts[pos];
+        if (!txt) continue;
+        const raw = arrowOddsFor(+pos);
+        txt.text = (raw % 1 === 0) ? `${raw}x` : `${raw.toFixed(1)}x`;
+      }
+    }
     function refreshArrowBetVisuals() {
       if (!scene.arrowBetTexts) return;
       const busy = !!(scene.spinBtn && scene.spinBtn.busy);
@@ -6447,14 +6544,24 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
               // starts from whatever's already there (handles stacking
               // when a second officer hits an already-boosted arrow).
               const oldShown = parseFloat(oddsTxt.text) || arrowOddsFor(f.ringPos);
-              if (!scene.boostedArrows[f.ringPos]) {
+              const isFirstHit = !scene.boostedArrows[f.ringPos];
+              if (isFirstHit) {
                 scene.boostedArrows[f.ringPos] = {
                   text: oddsTxt.text,
                   fill: oddsTxt.style.fill,
                   fontSize: oddsTxt.style.fontSize,
+                  boost: 0,    // running sum of fire mults stamped here
                 };
               }
-              const boosted = oldShown * f.multiplier;
+              // Engine stacks officer mults ADDITIVELY (boost = sum
+              // of fire mults). Final displayed value = arrowOdds × boost.
+              // Track the running boost sum on the snapshot — reading
+              // the text would race with the count-up tween (a second
+              // fire arriving mid-tween would see oldShown still ≈ 8x).
+              const baseOdds = arrowOddsFor(f.ringPos);
+              const snap = scene.boostedArrows[f.ringPos];
+              snap.boost = (snap.boost || 0) + f.multiplier;
+              const boosted = baseOdds * snap.boost;
 
               // ── Impact-weight scale ──
               // Bigger multipliers don't render bigger — they HIT
