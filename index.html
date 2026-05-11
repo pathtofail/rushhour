@@ -2768,6 +2768,53 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
           paytableContent.addChild(r);
         }
         cy += Math.ceil(officers.length / offColCount) * offRowH + 24 * scale;
+
+        // ── Special bets ──────────────────────────────────────────
+        // Recap the 3 special-bet tiers so players know what they're
+        // paying for. Pulls cost + mechanic line from ANTE_MODES so
+        // any tuning change stays in sync with the paytable.
+        sectionTitle('SPECIAL BETS', cy);
+        cy += 22 * scale;
+        bodyText('Tap SPECIAL BETS to multiply your stake for buffed', cy);
+        cy += 18 * scale;
+        bodyText('officer mechanics. Your bet still wins from the base', cy);
+        cy += 18 * scale;
+        bodyText('amount — the extra pays for the bigger chances.', cy);
+        cy += 24 * scale;
+        const sbRows = [
+          { key: 'ante1',  desc: 'Officers fire 2× more often.' },
+          { key: 'super1', desc: 'All 4 officers always fire each spin.' },
+          { key: 'super2', desc: 'All fire + 10×–1000× mults + doubled exit pays.' },
+        ];
+        const sbRowH = 36 * scale;
+        for (const row of sbRows) {
+          const def = ANTE_MODES[row.key];
+          if (!def) continue;
+          // Mode name (left) + cost badge (right) on the top line.
+          const nameTxt = new PIXI.Text(def.name, {
+            fontFamily: FONT, fontSize: 14 * scale,
+            fill: 0xFFFFFF, fontWeight: '800', letterSpacing: 2,
+          });
+          nameTxt.x = leftX + 8 * scale; nameTxt.y = cy;
+          paytableContent.addChild(nameTxt);
+          const costTxt = new PIXI.Text(`${def.costMult}× BET`, {
+            fontFamily: FONT, fontSize: 14 * scale,
+            fill: 0xFFD23F, fontWeight: '800',
+          });
+          costTxt.anchor.set(1, 0);
+          costTxt.x = leftX + colW;
+          costTxt.y = cy;
+          paytableContent.addChild(costTxt);
+          // Description below the name.
+          const descTxt = new PIXI.Text(row.desc, {
+            fontFamily: FONT, fontSize: 11 * scale,
+            fill: 0xA8AEB6, fontWeight: '500',
+          });
+          descTxt.x = leftX + 8 * scale; descTxt.y = cy + 18 * scale;
+          paytableContent.addChild(descTxt);
+          cy += sbRowH;
+        }
+        cy += 8 * scale;
       }
 
       // ── Cars ──
@@ -2838,24 +2885,40 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       rulesBody.y = contentTop;
       rulesContent.addChild(rulesBody);
 
-      // ── Rules scroll setup ────────────────────────────────────────────
-      // Mask the rules content to the modal's content area; mouse wheel
-      // translates rulesContent.y. A thin gold scrollbar runs along the
-      // right edge to indicate scroll position. Paytable doesn't scroll.
+      // ── Scroll setup ──────────────────────────────────────────────
+      // Both tabs are scrollable: each content container is masked to
+      // the modal's content area, mouse wheel translates the active
+      // tab's content.y, and a single gold scrollbar tracks whichever
+      // tab is showing. Scroll offsets are kept per-tab so switching
+      // tabs preserves position.
       const scrollAreaLeft  = panelX + 24 * scale;
       const scrollAreaRight = panelX + panelW - 24 * scale;
       const scrollAreaTop   = contentTop;
       const scrollAreaBot   = contentBot;
       const scrollAreaH     = scrollAreaBot - scrollAreaTop;
-      const rulesMask = new PIXI.Graphics();
-      rulesMask.beginFill(0xFFFFFF);
-      rulesMask.drawRect(scrollAreaLeft, scrollAreaTop,
-                         scrollAreaRight - scrollAreaLeft, scrollAreaH);
-      rulesMask.endFill();
-      modal.addChild(rulesMask);
-      rulesContent.mask = rulesMask;
+      const makeMask = () => {
+        const m = new PIXI.Graphics();
+        m.beginFill(0xFFFFFF);
+        m.drawRect(scrollAreaLeft, scrollAreaTop,
+                   scrollAreaRight - scrollAreaLeft, scrollAreaH);
+        m.endFill();
+        modal.addChild(m);
+        return m;
+      };
+      const paytableMask = makeMask();
+      const rulesMask    = makeMask();
+      paytableContent.mask = paytableMask;
+      rulesContent.mask    = rulesMask;
 
-      // Scrollbar (visible only when content overflows + rules tab is on).
+      // Total content heights — captured BEFORE masking would clip
+      // height calc. paytable uses cy (running Y cursor at end of
+      // render); rules uses the wrapped text height.
+      const paytableTotalH = cy - contentTop;
+      const rulesTotalH    = rulesBody.height;
+      const paytableScrollMax = Math.max(0, paytableTotalH - scrollAreaH);
+      const rulesScrollMax    = Math.max(0, rulesTotalH    - scrollAreaH);
+
+      // Scrollbar (visible only when active tab's content overflows).
       const sbW = 5 * scale;
       const sbX = scrollAreaRight - sbW - 2 * scale;
       const sbTrack = new PIXI.Graphics();
@@ -2864,20 +2927,24 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       sbTrack.endFill();
       modal.addChild(sbTrack);
       const sbThumb = new PIXI.Graphics();
-      sbThumb.beginFill(0xC9A24A, 1);
       modal.addChild(sbThumb);
 
-      const rulesTotalH = rulesBody.height;
-      const rulesScrollMax = Math.max(0, rulesTotalH - scrollAreaH);
+      const activeScrollInfo = () => {
+        if (rulesContent.visible) {
+          return { content: rulesContent,    total: rulesTotalH,    max: rulesScrollMax };
+        }
+        return     { content: paytableContent, total: paytableTotalH, max: paytableScrollMax };
+      };
       const updateScrollbar = () => {
+        const info = activeScrollInfo();
         sbThumb.clear();
-        if (rulesScrollMax <= 0 || !rulesContent.visible) {
+        if (info.max <= 0) {
           sbTrack.visible = false;
           return;
         }
         sbTrack.visible = true;
-        const thumbH = Math.max(20 * scale, scrollAreaH * (scrollAreaH / rulesTotalH));
-        const ratio = -rulesContent.y / rulesScrollMax;
+        const thumbH = Math.max(20 * scale, scrollAreaH * (scrollAreaH / info.total));
+        const ratio = -info.content.y / info.max;
         const thumbY = scrollAreaTop + ratio * (scrollAreaH - thumbH);
         sbThumb.beginFill(0xC9A24A, 1);
         sbThumb.drawRoundedRect(sbX, thumbY, sbW, thumbH, sbW / 2);
@@ -2887,11 +2954,11 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
 
       const onWheel = (e) => {
         if (!scene.paytableModal) return;
-        if (!rulesContent.visible) return;
-        if (rulesScrollMax <= 0) return;
+        const info = activeScrollInfo();
+        if (info.max <= 0) return;
         e.preventDefault();
-        rulesContent.y = Math.max(-rulesScrollMax,
-                                   Math.min(0, rulesContent.y - e.deltaY));
+        info.content.y = Math.max(-info.max,
+                                   Math.min(0, info.content.y - e.deltaY));
         updateScrollbar();
       };
       window.addEventListener('wheel', onWheel, { passive: false });
@@ -2904,8 +2971,6 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         });
         paytableContent.visible = (tabSprites[activeIdx]._key === 'paytable');
         rulesContent.visible    = (tabSprites[activeIdx]._key === 'rules');
-        // Reset rules scroll when switching back to rules.
-        if (rulesContent.visible) rulesContent.y = 0;
         updateScrollbar();
       }
 
