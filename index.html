@@ -2836,10 +2836,15 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       modal.addChild(specialBetsContent);
       let specialBetsContentEndY = contentTop;
       if (MODE === 'officer') {
+        // Use absolute pixel sizes on mobile (modal scale ~0.5 on
+        // phone shrinks scaled fonts to ~6-9pt, unreadable). Desktop
+        // keeps the scale-multiplied sizes so the modal feels native.
+        const M = !!L.isMobile;
+        const sz = (px) => M ? px : px * scale;
         let scy = contentTop;
         const sbTitle = (text, y, fill = 0xFFD23F, size = 13) => {
           const t = new PIXI.Text(text, {
-            fontFamily: FONT, fontSize: size * scale, fill,
+            fontFamily: FONT, fontSize: sz(size), fill,
             letterSpacing: 2, fontWeight: '800',
           });
           t.x = leftX; t.y = y;
@@ -2847,9 +2852,9 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         };
         const sbBody = (text, y, opts = {}) => {
           const t = new PIXI.Text(text, {
-            fontFamily: FONT, fontSize: (opts.size || 13) * scale,
+            fontFamily: FONT, fontSize: sz(opts.size || 13),
             fill: opts.fill ?? 0xE8DDC4, fontWeight: opts.weight || '500',
-            wordWrap: true, wordWrapWidth: colW - 16 * scale,
+            wordWrap: true, wordWrapWidth: colW - sz(16),
           });
           t.x = leftX + (opts.indent || 0); t.y = y;
           specialBetsContent.addChild(t);
@@ -2857,14 +2862,14 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         };
         // Intro.
         sbTitle('HOW IT WORKS', scy);
-        scy += 22 * scale;
+        scy += sz(22);
         scy += sbBody(
           'Tap SPECIAL BETS to multiply your stake for buffed officer mechanics. ' +
           'Your win is still calculated from the BASE chip value — the extra you ' +
           'pay buys bigger fire chances and richer multipliers, not bigger wins per arrow.',
           scy,
         );
-        scy += 22 * scale;
+        scy += sz(22);
 
         // Per-tier cards.
         const tiers = [
@@ -2884,72 +2889,79 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
             details: 'Top tier. Bigger arrow odds AND bigger officer multipliers — the highest hits are reserved for this mode.',
           },
         ];
-        const cardPad = 14 * scale;
+        const cardPad = sz(14);
         const cardInnerW = colW - cardPad * 2;
+        const fsName    = sz(18);
+        const fsCost    = sz(15);
+        const fsBlurb   = sz(13);
+        const fsDetails = sz(11);
+        const headerH   = sz(28);
+        const innerGap1 = sz(6);
+        const innerGap2 = sz(10);
+        const cardGap   = sz(14);
         for (const tier of tiers) {
           const def = ANTE_MODES[tier.key];
           if (!def) continue;
           // Probe heights for blurb + details so we can draw the card bg.
           const probeBlurb = new PIXI.Text(tier.blurb, {
-            fontFamily: FONT, fontSize: 13 * scale, fill: 0xE8DDC4,
+            fontFamily: FONT, fontSize: fsBlurb, fill: 0xE8DDC4,
             fontWeight: '500',
             wordWrap: true, wordWrapWidth: cardInnerW,
           });
           const probeDetails = new PIXI.Text(tier.details, {
-            fontFamily: FONT, fontSize: 11 * scale, fill: 0xA8AEB6,
+            fontFamily: FONT, fontSize: fsDetails, fill: 0xA8AEB6,
             fontWeight: '500',
             wordWrap: true, wordWrapWidth: cardInnerW,
           });
-          const headerH = 28 * scale;
           const blurbH = probeBlurb.height;
           const detailsH = probeDetails.height;
           probeBlurb.destroy();
           probeDetails.destroy();
-          const cardH = cardPad + headerH + 6 * scale + blurbH + 10 * scale + detailsH + cardPad;
+          const cardH = cardPad + headerH + innerGap1 + blurbH + innerGap2 + detailsH + cardPad;
           // Card bg.
           const cardBg = new PIXI.Graphics();
-          cardBg.lineStyle(2 * scale, 0xC9A24A, 1);
+          cardBg.lineStyle(M ? 2 : 2 * scale, 0xC9A24A, 1);
           cardBg.beginFill(0x232B45, 1);
-          cardBg.drawRoundedRect(leftX, scy, colW, cardH, 12 * scale);
+          cardBg.drawRoundedRect(leftX, scy, colW, cardH, sz(12));
           cardBg.endFill();
           specialBetsContent.addChild(cardBg);
           // Header row: mode name (left) + cost badge (right).
           const nameTxt = new PIXI.Text(def.name, {
-            fontFamily: FONT, fontSize: 18 * scale, fill: 0xFFD23F,
-            fontWeight: '900', letterSpacing: 3,
+            fontFamily: FONT, fontSize: fsName, fill: 0xFFD23F,
+            fontWeight: '900', letterSpacing: M ? 2 : 3,
           });
           nameTxt.x = leftX + cardPad;
           nameTxt.y = scy + cardPad;
           specialBetsContent.addChild(nameTxt);
           const costTxt = new PIXI.Text(`${def.costMult}× BET`, {
-            fontFamily: FONT, fontSize: 15 * scale, fill: 0xFFFFFF,
-            fontWeight: '800', letterSpacing: 2,
+            fontFamily: FONT, fontSize: fsCost, fill: 0xFFFFFF,
+            fontWeight: '800', letterSpacing: M ? 1.5 : 2,
           });
           costTxt.anchor.set(1, 0);
           costTxt.x = leftX + colW - cardPad;
-          costTxt.y = scy + cardPad + 2 * scale;
+          costTxt.y = scy + cardPad + sz(2);
           specialBetsContent.addChild(costTxt);
           // Blurb (primary mechanic).
           const blurb = new PIXI.Text(tier.blurb, {
-            fontFamily: FONT, fontSize: 13 * scale, fill: 0xE8DDC4,
+            fontFamily: FONT, fontSize: fsBlurb, fill: 0xE8DDC4,
             fontWeight: '500',
             wordWrap: true, wordWrapWidth: cardInnerW,
           });
           blurb.x = leftX + cardPad;
-          blurb.y = scy + cardPad + headerH + 6 * scale;
+          blurb.y = scy + cardPad + headerH + innerGap1;
           specialBetsContent.addChild(blurb);
           // Details (secondary line).
           const details = new PIXI.Text(tier.details, {
-            fontFamily: FONT, fontSize: 11 * scale, fill: 0xA8AEB6,
+            fontFamily: FONT, fontSize: fsDetails, fill: 0xA8AEB6,
             fontWeight: '500',
             wordWrap: true, wordWrapWidth: cardInnerW,
           });
           details.x = leftX + cardPad;
-          details.y = blurb.y + blurbH + 10 * scale;
+          details.y = blurb.y + blurbH + innerGap2;
           specialBetsContent.addChild(details);
-          scy += cardH + 14 * scale;
+          scy += cardH + cardGap;
         }
-        scy += 8 * scale;
+        scy += sz(8);
         specialBetsContentEndY = scy;
       }
 
@@ -3840,7 +3852,11 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       // staked cell. One tap clears the entire stake on that arrow.
       const makeTrashBadge = (onTap) => {
         const cont = new PIXI.Container();
-        const r = 9 * gs;
+        // Visual stays small so it doesn't dominate the cell; hit area
+        // is much bigger (≥44pt on mobile, ~32pt on desktop) so the
+        // tap target is easy to land on a thumb.
+        const r = (L.isMobile ? 11 : 9) * gs;
+        const hitR = L.isMobile ? Math.max(22, r * 2.4) : Math.max(16, r * 1.8);
         const bg = new PIXI.Graphics();
         const draw = (hover = false) => {
           bg.clear();
@@ -3860,7 +3876,7 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         cont.addChild(x);
         cont.eventMode = 'static';
         cont.cursor    = 'pointer';
-        cont.hitArea   = new PIXI.Circle(0, 0, r * 1.5);
+        cont.hitArea   = new PIXI.Circle(0, 0, hitR);
         cont.on('pointerover', () => { draw(true);  cont.scale.set(1.15); });
         cont.on('pointerout',  () => { draw(false); cont.scale.set(1.00); });
         cont.on('pointertap', (e) => {
@@ -4688,11 +4704,22 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
       // The radio sits below the desktop block / beside the mobile
       // pill and uses the standard radio look (outline + filled inner
       // dot when active).
-      const sbW = L.isMobile ? Math.min(L.sw - 2 * L.hpad, 360) : 110;
+      const sbRadioR = L.isMobile ? 10 : 16;
+      // Toggle footprint (mobile only, since desktop nests the toggle
+      // INSIDE the block). Width = 2× height × 1.85 aspect.
+      const _sbToggleW_mobile = sbRadioR * 2 * 1.85;
+      const _sbRadioGap_mobile = 12;
+      const _sbReserve_mobile = _sbToggleW_mobile + _sbRadioGap_mobile;
+      // Align the SPECIAL BETS pill + toggle combo with the chips row
+      // beneath it: combo total width = chipsW, so the cluster's left
+      // and right edges sit exactly under the chip row's edges. Pill
+      // width drops by the toggle footprint to make room.
+      const sbW = L.isMobile
+        ? Math.max(120, chipsW - _sbReserve_mobile)
+        : 110;
       // Desktop block now houses the toggle inside, so it needs more
       // vertical room (text rows up top + toggle near the bottom).
-      const sbH = L.isMobile ? 38 : 140;
-      const sbRadioR = L.isMobile ? 14 : 16;
+      const sbH = L.isMobile ? 28 : 140;
       const makeSpecialBetsBtn = () => {
         const cont = new PIXI.Container();
         const bg = new PIXI.Graphics();
@@ -4701,8 +4728,8 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         // Two text rows on desktop (caption + sub-line). Mobile uses
         // a single line and ignores the sub-line.
         const lblTop = new PIXI.Text('', {
-          fontFamily: FONT, fontSize: isMobile ? 13 : 14,
-          fill: 0xFFFFFF, fontWeight: '800', letterSpacing: 1.6,
+          fontFamily: FONT, fontSize: isMobile ? 11 : 14,
+          fill: 0xFFFFFF, fontWeight: '800', letterSpacing: isMobile ? 1.2 : 1.6,
           align: 'center',
         });
         lblTop.anchor.set(0.5);
@@ -4865,10 +4892,14 @@ That's it. Drop chips, press PLAY, watch the traffic.`;
         const totalCY    = ctrlRowCY  + ctrlH / 2 + ROW_GAP + totalBoxH / 2;
         const playCY     = totalCY    + totalBoxH / 2 + ROW_GAP + playH / 2;
         const centerX    = L.sw / 2;
-        // SPECIAL BETS button + radio — pill centred, radio to its right.
+        // SPECIAL BETS button + toggle — combo centred as a unit so
+        // the pill never crowds out the toggle on the right edge.
+        const sbToggleW  = sbRadioR * 2 * 1.85;
         const sbRadioGap = 12;
-        const sbBtnCX = centerX - sbRadioR - sbRadioGap / 2;
-        const sbRadioCX = sbBtnCX + sbW / 2 + sbRadioGap + sbRadioR;
+        const sbCombo    = sbW + sbRadioGap + sbToggleW;
+        const sbComboL   = (L.sw - sbCombo) / 2;
+        const sbBtnCX    = sbComboL + sbW / 2;
+        const sbRadioCX  = sbComboL + sbW + sbRadioGap + sbToggleW / 2;
         scene.specialBetsBtn.x   = sbBtnCX;
         scene.specialBetsBtn.y   = sbRowCY;
         scene.specialBetsRadio.x = sbRadioCX;
